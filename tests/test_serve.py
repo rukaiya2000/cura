@@ -842,3 +842,81 @@ def test_patients_follow_a_changed_identifier(tmp_path):
     assert [p["name"] for p in found] == ["Sara", "Tomas"]
     assert store.list("usr_9912") == [], "rows were copied rather than moved"
     assert [p["id"] for p in found] == ["PT-10001", "PT-10002"], "ids collided on merge"
+
+
+def test_the_server_script_persists_both_stores():
+    """A store that *can* persist is not a store that *does*. LiveConsultations grew a
+    `path` and the server was never given one, so `_save()` returned immediately and a
+    seeded consultation reported success while writing nothing. The class was tested; the
+    wiring was not."""
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "serve_consult.py").read_text()
+
+    assert "PatientStore(path=" in source, "patients are not persisted by the server"
+    assert "LiveConsultations(" in source and "consultations.json" in source, \
+        "consultations are not persisted by the server"
+
+
+def test_a_store_without_a_path_does_not_pretend_to_save(tmp_path):
+    """In-memory is a legitimate mode — the tests use it. It must simply not claim
+    otherwise, and must never raise."""
+    from skillforge.adapters.meetstream import Utterance
+    from skillforge.ui.serve import LiveConsultations
+
+    store = LiveConsultations()          # no path
+    assert store.said(Utterance(text="Anything.", speaker="Amara Okafor", role="patient",
+                                at="2026-07-25T09:20:30", binding=HOOK_BINDING)) is True
+    assert store.get("con-0912")["said"], "the line was not even held in memory"
+
+
+# --- the bot answering when spoken to ----------------------------------------
+
+
+def test_being_asked_if_it_can_hear_does_not_break_the_transcript(hooks, monkeypatch):
+    """The reply is best-effort and runs *after* storage. A bot that cannot get a word
+    into the chat is a small disappointment; a webhook that 500s loses the consultation,
+    and MeetStream does not retry."""
+    import skillforge.ui.serve as serve
+
+    class Broken:
+        def say(self, *a, **k):
+            raise RuntimeError("meeting already ended")
+
+    monkeypatch.setattr(serve, "MeetStream", lambda *a, **k: Broken())
+    r = hooked(hooks, "/hooks/transcript", turn("Hi Cura, can you hear me?"))
+
+    assert r.status == 200
+    assert hooks["live"].get("con-0912")["said"][0]["text"] == "Hi Cura, can you hear me?"
+
+
+def test_it_replies_when_addressed(hooks, monkeypatch):
+    import skillforge.ui.serve as serve
+
+    said = []
+
+    class Recording:
+        def say(self, bot_id, message):
+            said.append((bot_id, message))
+            return {"ok": True}
+
+    monkeypatch.setattr(serve, "MeetStream", lambda *a, **k: Recording())
+    hooked(hooks, "/hooks/transcript", turn("Hi Cura, can you hear me?"))
+
+    assert said and said[0][1] == "Yes, I can hear you."
+
+
+def test_it_stays_silent_through_the_consultation(hooks, monkeypatch):
+    """The property that matters most: it does not join in."""
+    import skillforge.ui.serve as serve
+
+    said = []
+    monkeypatch.setattr(serve, "MeetStream",
+                        lambda *a, **k: type("R", (), {"say": lambda s, b, m: said.append(m)})())
+
+    for line in ["The morning readings are higher than they were.",
+                 "Any change to how you're taking the ramipril?",
+                 "No, same as before.",
+                 "Can you hear me?"]:
+        hooked(hooks, "/hooks/transcript", turn(line))
+
+    assert said == [], f"the bot spoke during the consultation: {said}"
+    assert len(hooks["live"].get("con-0912")["said"]) == 4, "but every line was recorded"

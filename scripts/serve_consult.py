@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from skillforge.adapters.auth import Auth
 from skillforge.config import get, load_env
-from skillforge.ui.serve import PatientStore, make_server
+from skillforge.ui.serve import LiveConsultations, PatientStore, make_server
 
 BUILD = ROOT / "build"
 DIM, BOLD, GREEN, AMBER, RED, OFF = (
@@ -71,6 +71,8 @@ def main() -> int:
     server = make_server(root=BUILD, auth=Auth(redirect_uri=redirect_uri),
                          host=args.host, port=args.port,
                          patients=PatientStore(path=ROOT / "data" / "patients.json"),
+                         consultations=LiveConsultations(
+                             path=ROOT / "data" / "consultations.json"),
                          public_url=args.public)
     if not args.no_browser:
         try:

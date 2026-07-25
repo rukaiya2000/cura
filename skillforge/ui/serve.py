@@ -34,6 +34,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from ..adapters.auth import Auth, AuthError, Session
+from ..core.drafting import ClaudeDrafter, DraftError
+from ..core.wake import reply_to
 from ..adapters.meetstream import (
     Binding,
     MeetStream,
@@ -52,6 +54,7 @@ TRANSCRIPT_HOOK = "/hooks/transcript"
 LIFECYCLE_HOOK = "/hooks/bot"
 SEND_BOT_ROUTE = "/bot/send"
 PATIENTS_ROUTE = "/patients"
+DRAFT_PREFIX = "/consultation/"
 #: A transcript turn is a sentence. Anything approaching a megabyte is not one, and
 #: reading an unbounded Content-Length from an unauthenticated caller is how a public
 #: endpoint becomes a memory exhaustion bug.
@@ -161,6 +164,50 @@ class PatientStore:
         return next((p for p in self.rows.get(clinician, ())
                      if p["id"] == patient_id), None)
 
+    #: Fields a clinician may edit directly. Everything else about a patient is derived
+    #: from consultations, and a form that let you type it would be a form that lets you
+    #: disagree with the record.
+    EDITABLE = ("conditions", "medications", "allergies", "phone")
+
+    def update(self, clinician: str, patient_id: str, changes: dict) -> dict | None:
+        patient = self.get(clinician, patient_id)
+        if patient is None:
+            return None
+        for key in self.EDITABLE:
+            if key in changes:
+                value = changes[key]
+                patient[key] = ([v.strip() for v in value if str(v).strip()]
+                                if isinstance(value, list) else str(value).strip())
+        self._save()
+        return patient
+
+    def observe(self, clinician: str, patient_id: str, entries: list[dict]) -> dict | None:
+        """Append what a consultation learned, without overwriting what was there.
+
+        Appended rather than replaced, and each entry keeps the consultation it came
+        from. A record that silently rewrites itself is one nobody can audit, and "when
+        did we first know this?" is a question clinical records exist to answer.
+        """
+        patient = self.get(clinician, patient_id)
+        if patient is None:
+            return None
+        known = {(n.get("kind"), n.get("text")) for n in patient.setdefault("notes", [])}
+        for entry in entries:
+            key = (entry.get("kind"), entry.get("text"))
+            if key in known or not entry.get("text"):
+                continue
+            known.add(key)
+            patient["notes"].append(entry)
+            # Conditions and medications are also surfaced as lists, because that is how
+            # a doctor scans them — but the note remains the record of when it was said.
+            bucket = {"condition": "conditions", "medication": "medications",
+                      "allergy": "allergies"}.get(entry.get("kind"))
+            if bucket and entry["text"] not in patient.setdefault(bucket, []):
+                patient[bucket].append(entry["text"])
+        patient["consultations"] = patient.get("consultations", 0) + 1
+        self._save()
+        return patient
+
     def add(self, clinician: str, *, name: str, dob: str = "", email: str = "",
             nhs: str = "") -> dict:
         mine = self.rows.setdefault(clinician, [])
@@ -173,7 +220,14 @@ class PatientStore:
             "email": email.strip().lower(),
             "nhs": nhs.strip(),
             "crm_id": None,          # no record until one is created, deliberately
+            # The clinical picture. Empty at creation — these are what the consultations
+            # fill in — but editable, because a doctor moving an existing patient across
+            # should not have to hold three years of history in their head until the next
+            # appointment.
             "conditions": [],
+            "medications": [],
+            "allergies": [],
+            "notes": [],
             "consultations": 0,
             "added_by": clinician,
         }
@@ -230,6 +284,10 @@ class LiveConsultations:
             return False
         room = self._room(utterance.binding)
         room["said"].append({
+            # A stable id per line, assigned on arrival. The drafter cites these, and a
+            # citation is only checkable if the id it names never moves — so they are
+            # allocated once, here, rather than derived from position later.
+            "id": f"u{len(room['said']) + 1}",
             "at": utterance.at, "who": utterance.role,
             "name": utterance.speaker, "text": utterance.text,
         })
@@ -300,6 +358,7 @@ class Handler(BaseHTTPRequestHandler):
     patients: "PatientStore"
     hook_secret: str
     public_url: str
+    drafter: object
 
     # --- plumbing ----------------------------------------------------------
 
@@ -427,6 +486,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bot()
         if route == PATIENTS_ROUTE:
             return self.add_patient()
+        if route.startswith(DRAFT_PREFIX) and route.endswith("/draft"):
+            return self.draft_consultation(
+                route[len(DRAFT_PREFIX):-len("/draft")])
 
         if route not in (TRANSCRIPT_HOOK, LIFECYCLE_HOOK):
             return self._text("Not found", 404)
@@ -453,12 +515,73 @@ class Handler(BaseHTTPRequestHandler):
             # continuously and only completed turns are ours to keep.
             if event is not None:
                 self.consultations.said(event)
+                self.maybe_answer(event)
         else:
             event = normalize_lifecycle(payload)
             if event is not None:
                 self.consultations.lifecycle(event)
 
         return self._json({"ok": True, "kept": event is not None})
+
+    def maybe_answer(self, utterance) -> None:
+        """Say something back, but only when spoken to by name.
+
+        Runs after the line is stored, never instead of it: a reply that fails must not
+        cost the transcript. And it is best-effort — a bot that could not get a word into
+        the chat is a small disappointment, whereas a webhook that 500s because of it
+        loses the consultation, and MeetStream does not retry.
+        """
+        reply = reply_to(utterance.text)
+        if not reply or not utterance.bot_id:
+            return
+        try:
+            MeetStream().say(utterance.bot_id, reply)
+        except Exception:  # noqa: BLE001 — never let speaking break listening
+            pass
+
+    def draft_consultation(self, consultation_id: str):
+        """Draft the note and the letter from what was actually said.
+
+        Synchronous on purpose. Drafting takes tens of seconds and the honest thing is a
+        request that takes tens of seconds — a background job would need a queue, a poll
+        and a failure path, all to hide a wait the clinician is expecting anyway.
+        """
+        session = self.store.get(self._sid())
+        if session is None:
+            return self._json({"error": "Sign in first."}, 401)
+
+        room = self.consultations.get(consultation_id)
+        if room is None:
+            return self._json({"error": "No such consultation."}, 404)
+        # The binding names whose consultation this is; a doctor may only draft their own.
+        if room["clinician"] not in set(session.aliases):
+            return self._json({"error": "That is not your consultation."}, 403)
+        if not room.get("said"):
+            return self._json({"error":
+                "Nothing was said in this consultation, so there is nothing to draft."},
+                400)
+
+        patient = self.patients.get(session.identifier, room["patient_id"]) or {}
+        try:
+            draft = self.drafter.draft(
+                said=room["said"],
+                patient=room.get("patient_name") or "the patient",
+                clinician=session.name or "the clinician")
+        except DraftError as e:
+            return self._json({"error": str(e)}, 502)
+        except Exception as e:  # noqa: BLE001 — the model or the network; say which
+            return self._json({"error": f"{type(e).__name__}: {e}"}, 502)
+
+        room["draft"] = draft.to_event(recipient={
+            "name": room.get("patient_name", ""),
+            "email": patient.get("email", ""),
+            "verified_against": patient.get("crm_id") or patient.get("id", ""),
+        })
+        room["note"] = draft.note
+        self.consultations._save()
+        return self._json({"ok": True, "consultation_id": consultation_id,
+                           "unsupported": len(draft.unsupported),
+                           "invented_citations": draft.invented_citations})
 
     def add_patient(self):
         """Add a patient to the signed-in doctor's list.
@@ -620,7 +743,7 @@ def make_server(*, root: Path, auth: Auth, host: str = "127.0.0.1", port: int = 
                 store: SessionStore | None = None,
                 consultations: "LiveConsultations | None" = None,
                 patients: "PatientStore | None" = None,
-                hook_secret: str = "", public_url: str = "",
+                hook_secret: str = "", public_url: str = "", drafter=None,
                 public_paths: frozenset[str] = frozenset()) -> ThreadingHTTPServer:
     """A server bound to `root`, with login in front of everything but `public_paths`."""
     namespace = {
@@ -630,6 +753,7 @@ def make_server(*, root: Path, auth: Auth, host: str = "127.0.0.1", port: int = 
         "patients": patients if patients is not None else PatientStore(),
         "hook_secret": hook_secret or os.environ.get("MEETSTREAM_WEBHOOK_SECRET", ""),
         "public_url": public_url,
+        "drafter": drafter if drafter is not None else ClaudeDrafter(),
         # `is None`, not `or` — SessionStore defines __len__, so an empty store is falsy.
         # `store or SessionStore()` silently replaced a caller's fresh store with a second
         # one, and the symptom was sessions that appeared to be created and then weren't

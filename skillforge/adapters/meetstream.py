@@ -325,6 +325,19 @@ class MeetStream:
 
         return self._request("POST", "/bots/create_bot", body)
 
+    def say(self, bot_id: str, message: str) -> dict:
+        """Post a message into the meeting chat, as the bot.
+
+        Chat rather than synthesised speech. A voice talking over a consultation is an
+        interruption whether or not it is welcome, and a doctor mid-sentence cannot
+        un-hear it — a line in the chat is read when there is a gap. MeetStream offers
+        two-way audio if that changes.
+        """
+        if not message.strip():
+            raise MeetStreamError("nothing to say")
+        return self._request("POST", f"/bots/{bot_id}/send_message",
+                             {"message": message.strip()})
+
     def stop_bot(self, bot_id: str) -> dict:
         return self._request("POST", f"/bots/{bot_id}/leave", {})
 

@@ -158,6 +158,7 @@
   .form-note { color: var(--ink-3); font-size: var(--step--1); line-height: 1.5; }
   .form-error { color: var(--refused); font-size: var(--step--1); }
   .form-error[hidden] { display: none; }
+  .spacer { height: 0.9rem; }
   .add-form .btn {
     padding: 0.55rem 1rem; border-radius: var(--radius);
     border: 1px solid var(--accent); background: var(--accent); color: #fff;
@@ -806,22 +807,29 @@
   }
   let patientsFailed = false;
 
+  function refreshLive() {
+    return fetch("/live", { credentials: "same-origin", cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        LIVE = d.consultations;
+        // A live draft becomes *the* draft. The Approval screen reads one thing, so
+        // there is never a question of which draft is on screen.
+        const withDraft = LIVE.find((r) => r.draft);
+        draft = withDraft ? withDraft.draft : null;
+        liveNote = withDraft ? (withDraft.note || []) : [];
+        renderAll();
+      })
+      .catch(() => {});
+  }
+
   let livePoll = null;
   function pollLive() {
     if (livePoll) return;
-    livePoll = setInterval(() => {
-      fetch("/live", { credentials: "same-origin", cache: "no-store" })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          if (!d) return;
-          LIVE = d.consultations;
-          if (view === "consult") renderConsult();
-          renderNav();
-        })
-        .catch(() => {});
-    }, 3000);
+    livePoll = setInterval(refreshLive, 3000);
   }
   let LIVE = [];
+  let liveNote = [];
 
   $("signout").onclick = (e) => {
     if (live) return;               // a real session: let the link reach /auth/logout
@@ -1483,6 +1491,31 @@
           said.append(el("div", "who", line.name), el("div", "text", `“${line.text}”`));
           body.append(said);
         }
+
+        const err = el("p", "form-error");
+        err.hidden = true;
+        const go = el("button", "btn", room.draft
+          ? "Re-draft from the transcript" : "Draft the note and letter");
+        go.onclick = () => {
+          go.disabled = true;
+          go.textContent = "Reading the consultation…";
+          fetch(`/consultation/${room.consultation_id}/draft`,
+                { method: "POST", credentials: "same-origin" })
+            .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+              if (!ok) throw new Error(d.error || "Could not draft this.");
+              // Straight to Approval: the draft is the thing that now needs a human,
+              // and leaving the doctor on the transcript hides that.
+              refreshLive().then(() => show("approve"));
+            })
+            .catch((e) => {
+              err.textContent = live ? e.message : "No server behind this page.";
+              err.hidden = false;
+              go.disabled = false;
+              go.textContent = "Draft the note and letter";
+            });
+        };
+        body.append(el("div", "spacer"), go, err);
       }
       card.append(body);
       root.append(card);
@@ -1633,7 +1666,7 @@
 
   function clinicalNote() {
     const wrap = el("div");
-    for (const n of all("note")) {
+    for (const n of (liveNote.length ? liveNote : all("note"))) {
       const section = el("div", "note-section");
       section.append(el("h4", null, n.section));
       const b = el("button", "claim");

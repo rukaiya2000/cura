@@ -1,0 +1,18 @@
+# Credentials — never commit. .env.example is the committed template.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node (only used by scripts/verify_armory.js)
+node_modules/
+
+# Generated
+build/
+armory/

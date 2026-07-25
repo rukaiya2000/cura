@@ -1,0 +1,20 @@
+{
+  "skill": "escalate_and_rebalance",
+  "app": "linear",
+  "primitives_used": [
+    "linear.get_issue",
+    "linear.update_issue",
+    "linear.get_active_cycle",
+    "linear.link_issue",
+    "linear.list_issues",
+    "linear.create_comment"
+  ],
+  "effects": "write",
+  "version": 1,
+  "reversible": true,
+  "inverse": "restore_snapshot",
+  "forged_by": "priya@co",
+  "trust": "quarantined",
+  "description": "Escalate an issue to someone, mark it urgent, pull it into the team's active cycle, and flag the previous assignee's remaining high-priority work for re-triage.",
+  "stats": {}
+}

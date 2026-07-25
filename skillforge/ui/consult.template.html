@@ -1,0 +1,1408 @@
+<title>Forge — consultation assistant</title>
+
+<style>
+  /* ---------------------------------------------------------------------
+     White and blue, the register clinical software is read in: true white
+     panels on a pale blue ground, deep navy ink rather than black, and one
+     considered mid-blue accent — deep enough to carry authority without
+     tipping into the washed-out sky blue every health portal defaults to.
+
+     No gradients anywhere. Semantic colours (attention / done / refused /
+     new) stay off the blue axis so a status never reads as branding — and
+     teal, freed from being the accent, marks a new patient.
+
+     **Light only, deliberately.** This page previously followed
+     prefers-color-scheme and turned itself dark on any machine set to dark
+     mode — which is most of them — so the white-and-blue palette was never
+     what the doctor actually saw. Clinical software is read in one register
+     on every screen in the practice; a record that renders differently
+     depending on a laptop setting is a record two people can describe
+     differently. `color-scheme: light` below pins the form controls,
+     scrollbars and focus rings to match.
+     --------------------------------------------------------------------- */
+  :root {
+    color-scheme: light;
+    --ground: #f2f6fb;
+    --panel: #ffffff;
+    --panel-2: #f7fafd;
+    --rule: #dce6f2;
+    --rule-strong: #c2d3e8;
+    --ink: #10243d;
+    --ink-2: #40587a;
+    /* Measured against the *darkest* surface it lands on, not just white.
+       At #63769a it was 4.58:1 on white but only 4.37:1 on --panel-2, so the
+       meta and label text it carries failed AA on exactly the tinted cards
+       where most of it appears. #5e7195 clears 4.5:1 on all three grounds
+       (4.92 white / 4.69 panel-2 / 4.53 ground). */
+    --ink-3: #5e7195;
+
+    --accent: #1b5fa8;
+    --accent-soft: rgba(27, 95, 168, 0.08);
+    --done: #1a7a4b;
+    --attention: #96600b;
+    --refused: #a32a2a;
+    --refused-soft: rgba(163, 42, 42, 0.06);
+    --new: #0f7a86;
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --note: ui-serif, Charter, Georgia, "Iowan Old Style", serif;
+
+    --step--1: 0.78rem;
+    --step-0: 0.9rem;
+    --step-1: 1.05rem;
+    --step-2: 1.3rem;
+    --step-3: 1.65rem;
+
+    --gap: 0.9rem;
+    --pad: 1.1rem;
+    --radius: 6px;
+    /* Shadow tinted with the ink rather than neutral grey, so cards sit on the
+       pale blue ground instead of floating above a different colour space. */
+    --shadow: 0 1px 2px rgba(16, 36, 61, 0.05), 0 8px 24px -18px rgba(16, 36, 61, 0.3);
+  }
+
+  /* --- base ---------------------------------------------------------- */
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: var(--step-0)/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3 { margin: 0; font-weight: 600; text-wrap: balance; }
+  p { margin: 0; }
+
+  .label {
+    font: 600 var(--step--1)/1.3 var(--sans);
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+  }
+
+  :is(button, a, [tabindex]):focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  /* --- app chrome ---------------------------------------------------- */
+
+  .app {
+    display: grid;
+    grid-template-columns: 17.5rem minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "brand top" "rail main";
+    min-height: 100vh;
+  }
+  @media (max-width: 940px) {
+    .app { grid-template-columns: minmax(0, 1fr);
+           grid-template-areas: "brand" "top" "rail" "main"; }
+  }
+
+  .brand {
+    grid-area: brand;
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.85rem var(--pad);
+    background: var(--panel);
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .brand .mark {
+    display: grid; place-items: center;
+    width: 1.9rem; height: 1.9rem; border-radius: var(--radius);
+    background: var(--accent); color: var(--panel);
+    font: 700 var(--step-0) var(--sans);
+  }
+  .brand b { font-size: var(--step-1); }
+  .brand span { color: var(--ink-3); font-size: var(--step--1); }
+
+  .top {
+    grid-area: top;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.2rem;
+    padding: 0.85rem clamp(1rem, 3vw, 1.8rem);
+    background: var(--panel);
+    border-bottom: 1px solid var(--rule);
+  }
+  .top .who { margin-right: auto; }
+  .top .who b { display: block; }
+  .top .who span { color: var(--ink-3); font-size: var(--step--1); }
+
+  /* Hidden until /me confirms a real session — a dead sign-out link on a page opened
+     straight off disk is worse than no link at all. */
+  .signout {
+    color: var(--ink-3); font-size: var(--step--1); text-decoration: none;
+    padding: 0.25rem 0.6rem; border: 1px solid var(--rule); border-radius: 999px;
+  }
+  .signout:hover, .signout:focus-visible { color: var(--accent); border-color: var(--accent); }
+  .signout[hidden] { display: none; }
+
+  .avatar {
+    display: grid; place-items: center;
+    width: 2rem; height: 2rem; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    font: 600 var(--step--1) var(--sans);
+  }
+
+  .rail {
+    grid-area: rail;
+    background: var(--panel);
+    border-right: 1px solid var(--rule);
+    padding: var(--pad) 0.7rem;
+    display: flex; flex-direction: column; gap: 1.3rem;
+  }
+  @media (max-width: 940px) { .rail { border-right: 0; border-bottom: 1px solid var(--rule); } }
+
+  .nav { display: flex; flex-direction: column; gap: 0.15rem; }
+  .nav button {
+    display: flex; align-items: center; gap: 0.55rem;
+    padding: 0.5rem 0.65rem;
+    border: 0; border-radius: var(--radius);
+    background: transparent; color: var(--ink-2);
+    font: var(--step-0) var(--sans); text-align: left; cursor: pointer;
+  }
+  .nav button:hover { background: var(--panel-2); color: var(--ink); }
+  .nav button[aria-current="true"] {
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  }
+  .nav .count {
+    margin-left: auto; font: var(--step--1) var(--mono);
+    font-variant-numeric: tabular-nums; color: var(--ink-3);
+  }
+
+  .rail-group > .label { padding: 0 0.65rem 0.4rem; }
+
+  .slot {
+    display: grid; grid-template-columns: 3.2rem minmax(0, 1fr);
+    gap: 0.1rem 0.6rem; align-items: baseline;
+    width: 100%;
+    padding: 0.5rem 0.65rem;
+    border: 0; border-left: 2px solid transparent; border-radius: var(--radius);
+    background: transparent; color: inherit;
+    font: var(--step-0) var(--sans); text-align: left; cursor: pointer;
+  }
+  .slot:hover { background: var(--panel-2); }
+  .slot[aria-current="true"] { background: var(--accent-soft); border-left-color: var(--accent); }
+  .slot .at {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    color: var(--ink-3); font-size: var(--step--1);
+  }
+  .slot .name { font-weight: 600; }
+  .slot .why { grid-column: 2; color: var(--ink-3); font-size: var(--step--1); }
+  .slot[data-status="done"] .name { color: var(--ink-3); font-weight: 400; }
+  .slot[data-status="in_progress"] .at { color: var(--accent); font-weight: 700; }
+
+  .live-dot {
+    display: inline-block; width: 0.42rem; height: 0.42rem; border-radius: 50%;
+    background: var(--accent); margin-left: 0.35rem; vertical-align: 0.1em;
+  }
+
+  /* --- main --------------------------------------------------------- */
+
+  main { grid-area: main; padding: clamp(1rem, 2.5vw, 1.7rem); min-width: 0; }
+  .view { display: none; }
+  .view[data-active="true"] { display: block; }
+
+  .view-head {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 1rem;
+    margin-bottom: var(--gap);
+  }
+  .view-head h2 { font-size: var(--step-3); letter-spacing: -0.015em; }
+  .view-head .sub { color: var(--ink-3); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .card > header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: var(--gap); padding: 0.7rem var(--pad);
+    border-bottom: 1px solid var(--rule);
+  }
+  .card > .body { padding: var(--pad); }
+  .card > .body.tight { padding: 0.45rem var(--pad) var(--pad); }
+
+  .cols {
+    display: grid; gap: var(--gap);
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+    align-items: start;
+  }
+  @media (max-width: 1100px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+  .col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+
+  /* --- the approval screen ------------------------------------------ */
+
+  /* The letter is set in the serif the note uses, at a comfortable measure, because it
+     has to be read as a document rather than skimmed as an interface. A reviewer who
+     skims is a reviewer who approves. */
+  .letter { font: var(--step-0)/1.7 var(--note); max-width: 62ch; }
+  .letter .subject {
+    font: 600 var(--step-1) var(--sans); margin-bottom: 0.9rem;
+  }
+  .letter .greeting, .letter .signoff { margin: 0 0 0.9rem; white-space: pre-line; }
+  .letter .signoff { margin-top: 1.2rem; color: var(--ink-2); }
+
+  /* Each claim is its own control: clicking it shows what it was drawn from. Styled as
+     text, not as a button — the document must still read as a letter. */
+  .claim {
+    display: block; width: 100%; text-align: left;
+    font: inherit; color: inherit; background: transparent;
+    border: 0; border-left: 2px solid transparent;
+    padding: 0.3rem 0.5rem 0.3rem 0.65rem; margin: 0 0 0.5rem -0.65rem;
+    border-radius: 0 var(--radius) var(--radius) 0; cursor: pointer;
+  }
+  .claim:hover { background: var(--panel-2); border-left-color: var(--rule-strong); }
+  .claim[aria-current="true"] {
+    background: var(--accent-soft); border-left-color: var(--accent);
+  }
+  .claim[data-unsourced="true"] { border-left-color: var(--attention); }
+  .claim[data-unsourced="true"][aria-current="true"] {
+    background: rgba(150, 96, 11, 0.08); border-left-color: var(--attention);
+  }
+  .claim .warn {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    margin-left: 0.4rem; color: var(--attention);
+    font: 600 0.68rem var(--sans); letter-spacing: 0.04em; text-transform: uppercase;
+    vertical-align: 0.15em;
+  }
+  .claim .edited {
+    margin-left: 0.4rem; color: var(--accent);
+    font: 600 0.68rem var(--sans); letter-spacing: 0.04em; text-transform: uppercase;
+    vertical-align: 0.15em;
+  }
+  .claim textarea {
+    display: block; width: 100%; box-sizing: border-box;
+    font: inherit; color: inherit; background: var(--panel);
+    border: 1px solid var(--accent); border-radius: var(--radius);
+    padding: 0.5rem 0.6rem; resize: vertical; min-height: 5.5rem;
+  }
+
+  .todos { margin: 0.2rem 0 0; padding: 0; list-style: none; }
+  .todos li { display: flex; gap: 0.55rem; align-items: flex-start; }
+  .todos .tick {
+    flex: none; margin-top: 0.65rem; width: 0.42rem; height: 0.42rem;
+    border-radius: 50%; background: var(--accent);
+  }
+  .todos .claim { flex: 1; }
+
+  .letter-foot {
+    margin-top: 1.1rem; padding-top: 0.8rem; border-top: 1px dashed var(--rule-strong);
+    color: var(--ink-3); font: var(--step--1)/1.55 var(--sans);
+  }
+
+  /* --- provenance panel ---------------------------------------------- */
+
+  .prov-empty { color: var(--ink-3); font-size: var(--step--1); }
+  .prov-said {
+    border-left: 2px solid var(--rule-strong); padding: 0.1rem 0 0.1rem 0.7rem;
+    margin-bottom: 0.75rem;
+  }
+  .prov-said[data-who="patient"] { border-left-color: var(--accent); }
+  .prov-said .who {
+    font: 600 var(--step--1) var(--sans); color: var(--ink-3);
+    display: flex; gap: 0.5rem;
+  }
+  .prov-said .at { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .prov-said .text { font-family: var(--note); }
+  .prov-warn {
+    border-left: 2px solid var(--attention); padding-left: 0.7rem;
+    color: var(--ink-2); font-size: var(--step--1);
+  }
+  .prov-warn b { color: var(--attention); display: block; }
+
+  /* --- recipient + send ---------------------------------------------- */
+
+  .recipient { display: grid; gap: 0.15rem; margin-bottom: 0.9rem; }
+  .recipient .addr {
+    font-family: var(--mono); font-size: var(--step-0); color: var(--ink);
+    word-break: break-all;
+  }
+  .recipient .from-record { color: var(--ink-3); font-size: var(--step--1); }
+
+  .confirm {
+    display: flex; gap: 0.55rem; align-items: flex-start;
+    padding: 0.6rem 0.7rem; margin-bottom: 0.8rem;
+    background: var(--panel-2); border: 1px solid var(--rule);
+    border-radius: var(--radius); font-size: var(--step--1); cursor: pointer;
+  }
+  .confirm input { margin-top: 0.15rem; accent-color: var(--accent); }
+
+  .btn {
+    width: 100%; padding: 0.65rem 1rem; border-radius: var(--radius);
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    font: 600 var(--step-0) var(--sans); cursor: pointer;
+  }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.ghost { background: transparent; color: var(--accent); }
+  .btn.danger { background: transparent; color: var(--refused); border-color: var(--refused); }
+  .btn + .btn { margin-top: 0.5rem; }
+
+  .gate-note {
+    margin-top: 0.7rem; color: var(--ink-3);
+    font-size: var(--step--1); line-height: 1.5;
+  }
+
+  .holding { text-align: center; padding: 0.4rem 0 0.7rem; }
+  .holding .count {
+    font: 600 var(--step-3) var(--mono); font-variant-numeric: tabular-nums;
+    color: var(--accent); display: block;
+  }
+  .holding .label { color: var(--ink-2); font-size: var(--step--1); }
+
+  .sent-mark {
+    display: flex; gap: 0.6rem; align-items: flex-start;
+    color: var(--done); font-size: var(--step-0);
+  }
+  .sent-mark b { display: block; }
+  .sent-mark .detail { color: var(--ink-2); font-size: var(--step--1); }
+
+  .diff { margin-top: 0.9rem; font-size: var(--step--1); }
+  .diff h4 { font: 600 var(--step--1) var(--sans); color: var(--ink-3); margin-bottom: 0.4rem; }
+  .diff .was, .diff .now {
+    font-family: var(--note); padding: 0.35rem 0.5rem; border-radius: var(--radius);
+  }
+  .diff .was {
+    background: var(--refused-soft); color: var(--ink-2);
+    text-decoration: line-through; text-decoration-color: var(--refused);
+  }
+  .diff .now { background: rgba(26, 122, 75, 0.07); margin-top: 0.25rem; }
+
+  .doc-tabs { display: flex; gap: 0.4rem; }
+  .doc-tabs button {
+    border: 1px solid var(--rule); background: transparent; color: var(--ink-2);
+    padding: 0.25rem 0.7rem; border-radius: 999px;
+    font: var(--step--1) var(--sans); cursor: pointer;
+  }
+  .doc-tabs button[aria-current="true"] {
+    background: var(--accent-soft); color: var(--accent); border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* --- schedule / patient rows -------------------------------------- */
+
+  .rows { display: flex; flex-direction: column; }
+  .row-item {
+    display: grid; grid-template-columns: 4rem minmax(0, 1fr) auto;
+    gap: 0.15rem 0.9rem; align-items: center;
+    width: 100%; padding: 0.75rem var(--pad);
+    border: 0; border-top: 1px solid var(--rule);
+    background: transparent; color: inherit;
+    font: var(--step-0) var(--sans); text-align: left; cursor: pointer;
+  }
+  .row-item:first-child { border-top: 0; }
+  .row-item:hover { background: var(--panel-2); }
+  .row-item .when {
+    font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-3);
+  }
+  .row-item .who b { font-weight: 600; }
+  .row-item .who .meta { color: var(--ink-3); font-size: var(--step--1); }
+  .row-item .who .meta .sep { opacity: 0.5; margin: 0 0.35rem; }
+
+  .pill {
+    flex: none; padding: 0.15rem 0.5rem; border-radius: 999px;
+    border: 1px solid currentColor;
+    font: 600 0.68rem var(--sans); letter-spacing: 0.05em; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .pill[data-kind="done"] { color: var(--done); }
+  .pill[data-kind="in_progress"] { color: var(--accent); background: var(--accent-soft); }
+  .pill[data-kind="upcoming"] { color: var(--ink-3); }
+  .pill[data-kind="attention"] { color: var(--attention); }
+  .pill[data-kind="new"] { color: var(--new); }
+  .pill[data-kind="info"] { color: var(--ink-3); }
+
+  /* --- patient banner (consultation view) ----------------------------
+     Sticky and deliberately impossible to scroll away from. Acting on the
+     wrong patient is a named harm class in clinical software; the screen
+     should answer "whose record am I in" without scrolling, and the
+     backend enforces the same boundary. */
+
+  .patient-bar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.3rem;
+    padding: 0.8rem var(--pad);
+    margin-bottom: var(--gap);
+    background: var(--panel);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .patient-bar h2 { font-size: var(--step-2); letter-spacing: -0.01em; margin-right: auto; }
+
+  .facts { display: flex; flex-wrap: wrap; gap: 0.3rem 1.1rem; margin: 0; }
+  .fact { display: flex; flex-direction: column; }
+  .fact dt { font: 600 0.66rem/1.4 var(--sans); letter-spacing: 0.09em;
+             text-transform: uppercase; color: var(--ink-3); }
+  .fact dd { margin: 0; font: var(--step-0)/1.3 var(--mono);
+             font-variant-numeric: tabular-nums; }
+
+  .bound {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.26rem 0.6rem; border-radius: 999px;
+    border: 1px solid var(--accent); background: var(--accent-soft);
+    color: var(--accent); font: 600 var(--step--1) var(--sans); white-space: nowrap;
+  }
+  .bound::before {
+    content: ""; width: 0.42rem; height: 0.42rem; border-radius: 50%;
+    background: currentColor;
+  }
+
+  /* --- record details ----------------------------------------------- */
+
+  .dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.65rem 1rem; }
+  @media (max-width: 560px) { .dl { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; } }
+  .dl > dt { font: 600 var(--step--1) var(--sans); color: var(--ink-3); padding-top: 0.12rem; }
+  .dl > dd { margin: 0; }
+  .stack { display: flex; flex-direction: column; gap: 0.3rem; }
+
+  .med { display: flex; flex-wrap: wrap; gap: 0.15rem 0.5rem; align-items: baseline; }
+  .med b { font-weight: 600; }
+  .med .dose { font-family: var(--mono); font-variant-numeric: tabular-nums;
+               color: var(--ink-2); }
+  .med .freq { color: var(--ink-3); font-size: var(--step--1); }
+
+  .item { display: flex; gap: 0.5rem; align-items: baseline; }
+  .item .when { color: var(--ink-3); font-size: var(--step--1); }
+  .flag { flex: none; margin-top: 0.44rem; width: 0.4rem; height: 0.4rem;
+          border-radius: 50%; background: var(--ink-3); }
+  .item[data-urgency="attention"] .flag { background: var(--attention); }
+  .item[data-urgency="attention"] .when { color: var(--attention); }
+  .item[data-urgency="ok"] .flag { background: var(--done); }
+
+  .allergy {
+    display: inline-flex; padding: 0.14rem 0.5rem; border-radius: var(--radius);
+    border: 1px solid var(--refused); background: var(--refused-soft);
+    color: var(--refused); font: 600 var(--step--1) var(--sans);
+  }
+
+  /* --- the note ----------------------------------------------------- */
+
+  .note-section { padding: 0.85rem var(--pad); border-top: 1px solid var(--rule); }
+  .note-section:first-child { border-top: 0; }
+  .note-section h3 {
+    font: 600 var(--step--1) var(--sans); letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 0.25rem;
+  }
+  /* A consultation note is prose, and clinical records distinguish
+     narrative from structured fields — so it is set as prose. */
+  .note-section p, .prose { font: var(--step-1)/1.62 var(--note); max-width: 62ch; }
+
+  .said { display: grid; grid-template-columns: 5.2rem minmax(0, 1fr); gap: 0.25rem 0.85rem; }
+  .said + .said { margin-top: 0.5rem; }
+  .said .who { font: 600 var(--step--1) var(--sans); color: var(--ink-3); padding-top: 0.15rem; }
+  .said[data-who="clinician"] .who { color: var(--accent); }
+  .said .text { color: var(--ink-2); }
+  @media (max-width: 560px) { .said { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; } }
+
+  details.transcript > summary {
+    padding: 0.65rem var(--pad); cursor: pointer;
+    font: 600 var(--step--1) var(--sans); letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--ink-3);
+    border-top: 1px solid var(--rule);
+  }
+  details.transcript > summary:hover { color: var(--accent); }
+  details.transcript .body { padding-top: 0; }
+
+  /* --- actions ------------------------------------------------------ */
+
+  .action { padding: 0.8rem var(--pad); border-top: 1px solid var(--rule); }
+  .action:first-child { border-top: 0; }
+  .action[data-state="refused"] { background: var(--refused-soft); }
+
+  .action-head { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; }
+  .action-head .what { font-weight: 600; }
+  .action-head .state {
+    margin-left: auto; flex: none; font: 600 var(--step--1) var(--sans);
+    letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  .action[data-state="written"] .state { color: var(--done); }
+  .action[data-state="refused"] .state { color: var(--refused); }
+
+  .lines { display: flex; flex-direction: column; gap: 0.3rem; }
+  .line { display: grid; grid-template-columns: 4.4rem minmax(0, 1fr); gap: 0.7rem; }
+  .line .app {
+    font: 600 0.66rem/1.6 var(--sans); letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  .line .what { color: var(--ink-2); }
+  .line .detail { font-size: var(--step--1); color: var(--ink-3); }
+
+  .said-back {
+    margin-top: 0.5rem; padding-left: 0.7rem;
+    border-left: 2px solid var(--refused);
+    font: italic var(--step-0)/1.55 var(--note);
+  }
+  .why { margin-top: 0.5rem; font-size: var(--step--1); color: var(--ink-3); }
+  .why b { color: var(--ink-2); font-weight: 600; }
+  .confirmed { margin-top: 0.4rem; font-size: var(--step--1); color: var(--ink-3); }
+
+  /* --- history & access --------------------------------------------- */
+
+  .entry { padding: 0.8rem var(--pad); border-top: 1px solid var(--rule); }
+  .entry:first-child { border-top: 0; }
+  .entry-head { display: flex; flex-wrap: wrap; gap: 0.2rem 0.7rem; align-items: baseline; }
+  .entry-head .date {
+    font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-3);
+    font-size: var(--step--1);
+  }
+  .entry-head .reason { font-weight: 600; }
+  .entry-head .by { color: var(--ink-3); font-size: var(--step--1); margin-left: auto; }
+  .entry p { margin-top: 0.3rem; font: var(--step-0)/1.6 var(--note); color: var(--ink-2);
+             max-width: 64ch; }
+
+  table.access { width: 100%; border-collapse: collapse; font-size: var(--step--1); }
+  table.access th, table.access td {
+    text-align: left; padding: 0.32rem 0.6rem 0.32rem 0;
+    border-bottom: 1px solid var(--rule); white-space: nowrap;
+  }
+  table.access th { color: var(--ink-3); font-weight: 600; }
+  table.access td.t { font-family: var(--mono); font-variant-numeric: tabular-nums;
+                      color: var(--ink-3); }
+  .scroll-x { overflow-x: auto; }
+
+  .tallies {
+    display: flex; flex-wrap: wrap; gap: 0.3rem 1.4rem;
+    margin-top: 0.85rem; padding-top: 0.7rem; border-top: 1px solid var(--rule);
+  }
+  .tally { display: flex; flex-direction: column; }
+  .tally b { font: 600 var(--step-2)/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+  .tally span { font-size: var(--step--1); color: var(--ink-3); }
+  .tally[data-kind="refused"] b { color: var(--refused); }
+  .tally[data-kind="written"] b { color: var(--done); }
+
+  .empty { padding: 1.6rem var(--pad); color: var(--ink-3); text-align: center; }
+  .empty .prose { margin: 0 auto 0.8rem; }
+
+  footer.foot {
+    padding: 0 clamp(1rem, 2.5vw, 1.7rem) 2rem;
+    font-size: var(--step--1); color: var(--ink-3); max-width: 70ch;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition-duration: 0.001s !important; }
+  }
+</style>
+
+<div class="app">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">F</span>
+    <div>
+      <b>Forge</b><br />
+      <span>Consultation assistant</span>
+    </div>
+  </div>
+
+  <div class="top">
+    <div class="who" id="who"></div>
+    <div class="avatar" id="avatar" aria-hidden="true"></div>
+    <a class="signout" id="signout" href="/auth/logout" hidden>Sign out</a>
+  </div>
+
+  <nav class="rail" aria-label="Practice">
+    <div class="nav" id="nav" role="tablist"></div>
+    <div class="rail-group">
+      <p class="label" id="schedule-label">Today</p>
+      <div class="nav" id="slots"></div>
+    </div>
+  </nav>
+
+  <main>
+    <section class="view" id="view-today" role="tabpanel" aria-labelledby="tab-today"></section>
+    <section class="view" id="view-patients" role="tabpanel" aria-labelledby="tab-patients"></section>
+    <section class="view" id="view-consult" role="tabpanel" aria-labelledby="tab-consult"></section>
+    <section class="view" id="view-approve" role="tabpanel" aria-labelledby="tab-approve"></section>
+  </main>
+</div>
+
+<footer class="foot" id="foot"></footer>
+
+<script id="practice" type="application/json">__CONSULTATION_JSON__</script>
+
+<script>
+(() => {
+  "use strict";
+
+  const DATA = JSON.parse(document.getElementById("practice").textContent);
+  const EVENTS = DATA.consultation;
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const first = (type) => EVENTS.find((e) => e.type === type);
+  const all = (type) => EVENTS.filter((e) => e.type === type);
+  const byId = new Map(DATA.patients.map((p) => [p.id, p]));
+  const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:` +
+                       `${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const STATUS_TEXT = { done: "Seen", in_progress: "In progress", upcoming: "Upcoming" };
+
+  let view = "today";
+  let selected = DATA.active_patient;
+
+  // --- chrome --------------------------------------------------------
+
+  // The top bar renders from the baked-in clinician immediately, then upgrades to whoever
+  // actually signed in. Render-then-upgrade rather than fetch-then-render: the page opens
+  // from disk during development with no server behind it, and a header that waits on a
+  // request that will never answer looks broken.
+  const renderWho = (name, initials, meta) => {
+    $("who").replaceChildren(el("b", null, name),
+                             el("span", null, meta.filter(Boolean).join(" · ")));
+    $("avatar").textContent = initials;
+  };
+  renderWho(DATA.clinician.name, DATA.clinician.initials,
+            [DATA.clinician.role, DATA.today]);
+
+  fetch("/me", { credentials: "same-origin", cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((me) => {
+      if (!me || !me.identifier) return;
+      // The identifier is shown, not just the name: it is the string every tool call runs
+      // under, so seeing it is how the doctor knows *which* connected account is acting.
+      renderWho(me.name, me.initials,
+                [DATA.clinician.role, me.identifier, DATA.today]);
+      $("signout").hidden = false;
+    })
+    .catch(() => {});                 // no server, or offline: the baked-in header stands
+
+  const TABS = [
+    { id: "today", label: "Today", count: () => DATA.schedule.length },
+    { id: "patients", label: "Patients", count: () => DATA.patients.length },
+    { id: "consult", label: "Consultation", count: () => null },
+    { id: "approve", label: "Approval",
+      count: () => (draft && send.state !== "sent" ? 1 : null) },
+  ];
+
+  function renderNav() {
+    $("nav").textContent = "";
+    for (const tab of TABS) {
+      const b = el("button", null);
+      b.id = `tab-${tab.id}`;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-current", String(view === tab.id));
+      b.append(el("span", null, tab.label));
+      const n = tab.count();
+      if (n != null) b.append(el("span", "count", String(n)));
+      if (tab.id === "consult" && inProgress) b.append(el("span", "live-dot"));
+      b.onclick = () => show(tab.id);
+      $("nav").append(b);
+    }
+  }
+
+  const inProgress = DATA.schedule.find((s) => s.status === "in_progress");
+
+  function renderSlots() {
+    $("slots").textContent = "";
+    for (const slot of DATA.schedule) {
+      const p = byId.get(slot.patient);
+      const b = el("button", "slot");
+      b.dataset.status = slot.status;
+      b.setAttribute("aria-current",
+        String(view === "consult" && slot.status === "in_progress"));
+      b.append(el("span", "at", slot.time), el("span", "name", p ? p.name : slot.patient));
+      b.append(el("span", "why", slot.reason));
+      b.onclick = () => {
+        selected = slot.patient;
+        show(slot.status === "in_progress" ? "consult" : "patients");
+      };
+      $("slots").append(b);
+    }
+  }
+
+  function show(next) {
+    view = next;
+    for (const tab of TABS) {
+      $(`view-${tab.id}`).dataset.active = String(view === tab.id);
+    }
+    renderNav();
+    renderSlots();
+    if (view === "patients") renderPatients();
+    if (view === "approve") renderApprove();
+    // Setting scrollTop rather than calling window.scrollTo: same effect, and it works in
+    // embedding contexts that stub the scroll APIs out.
+    document.documentElement.scrollTop = 0;
+  }
+
+  // --- today ---------------------------------------------------------
+
+  function renderToday() {
+    const root = $("view-today");
+    root.textContent = "";
+    const head = el("div", "view-head");
+    head.append(el("h2", null, "Today"), el("span", "sub", DATA.today));
+    root.append(head);
+
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "Clinic list"),
+                  el("span", "label", `${DATA.schedule.length} appointments`));
+    card.append(header);
+
+    const rows = el("div", "rows");
+    for (const slot of DATA.schedule) {
+      const p = byId.get(slot.patient);
+      const row = el("button", "row-item");
+      row.append(el("span", "when", slot.time));
+
+      const who = el("div", "who");
+      who.append(el("b", null, p ? p.name : slot.patient));
+      const meta = el("div", "meta");
+      meta.append(document.createTextNode(slot.reason));
+      if (slot.binding) {
+        meta.append(el("span", "sep", "·"), document.createTextNode(slot.binding));
+      }
+      who.append(meta);
+      row.append(who);
+
+      const pill = el("span", "pill", STATUS_TEXT[slot.status] || slot.status);
+      pill.dataset.kind = slot.status;
+      row.append(pill);
+
+      row.onclick = () => {
+        selected = slot.patient;
+        show(slot.status === "in_progress" ? "consult" : "patients");
+      };
+      rows.append(row);
+    }
+    card.append(rows);
+    root.append(card);
+  }
+
+  // --- patients ------------------------------------------------------
+
+  function renderPatients() {
+    const root = $("view-patients");
+    root.textContent = "";
+    const patient = byId.get(selected);
+
+    const head = el("div", "view-head");
+    head.append(el("h2", null, patient ? patient.name : "Patients"));
+    if (patient) {
+      head.append(el("span", "sub",
+        patient.last_seen ? `last seen ${patient.last_seen}`
+                          : "no previous consultation"));
+    }
+    root.append(head);
+
+    const cols = el("div", "cols");
+    const left = el("div", "col");
+    const right = el("div", "col");
+
+    if (patient && patient.crm_id) {
+      left.append(recordCard(DATA.context));
+      left.append(historyCard(DATA.history));
+    } else if (patient) {
+      left.append(newPatientCard(patient));
+    }
+
+    right.append(rosterCard());
+    cols.append(left, right);
+    root.append(cols);
+  }
+
+  function newPatientCard(patient) {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "No record found"));
+    const pill = el("span", "pill", "New patient");
+    pill.dataset.kind = "new";
+    header.append(pill);
+    card.append(header);
+
+    const body = el("div", "empty");
+    body.append(el("p", "prose",
+      `${patient.name} has no record in the CRM. Creating one is a write, so it needs ` +
+      `your confirmation — nothing is created automatically from an appointment.`));
+    body.append(el("p", "label", "The bot will ask at the start of the consultation"));
+    card.append(body);
+    return card;
+  }
+
+  function rosterCard() {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "Patients"),
+                  el("span", "label", `${DATA.patients.length} registered`));
+    card.append(header);
+
+    const rows = el("div", "rows");
+    for (const p of DATA.patients) {
+      const row = el("button", "row-item");
+      row.setAttribute("aria-current", String(p.id === selected));
+      row.append(el("span", "when", p.id.replace("PT-", "")));
+
+      const who = el("div", "who");
+      who.append(el("b", null, p.name));
+      const meta = el("div", "meta");
+      meta.append(document.createTextNode(`${p.age} · ${p.conditions.join(", ") || "no conditions recorded"}`));
+      who.append(meta);
+      row.append(who);
+
+      if (p.flag) {
+        const pill = el("span", "pill", p.flag.text);
+        pill.dataset.kind = p.flag.urgency;
+        row.append(pill);
+      } else {
+        row.append(el("span"));
+      }
+
+      row.onclick = () => { selected = p.id; renderPatients(); };
+      rows.append(row);
+    }
+    card.append(rows);
+    return card;
+  }
+
+  function recordCard(ctx) {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "Record"),
+                  el("span", "label", `last seen ${ctx.last_seen_label}`));
+    card.append(header);
+
+    const body = el("div", "body");
+    const dl = el("dl", "dl");
+    const row = (term, node) => {
+      dl.append(el("dt", null, term));
+      const dd = el("dd");
+      dd.append(node);
+      dl.append(dd);
+    };
+    const stackOf = (items, build) => {
+      const s = el("div", "stack");
+      items.forEach((i) => s.append(build(i)));
+      return s;
+    };
+
+    row("Conditions", stackOf(ctx.conditions, (c) => el("div", null, c)));
+    row("Medication", stackOf(ctx.medications, (m) => {
+      const line = el("div", "med");
+      line.append(el("b", null, m.drug), el("span", "dose", m.dose),
+                  el("span", "freq", m.freq));
+      return line;
+    }));
+    row("Open items", stackOf(ctx.open_items, (i) => {
+      const line = el("div", "item");
+      line.dataset.urgency = i.urgency;
+      line.append(el("span", "flag"), el("span", null, i.what),
+                  el("span", "when", i.since));
+      return line;
+    }));
+    if (ctx.allergies && ctx.allergies.length) {
+      row("Allergies", stackOf(ctx.allergies, (a) => el("span", "allergy", a)));
+    }
+    body.append(dl);
+    card.append(body);
+    return card;
+  }
+
+  function historyCard(history) {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "Previous consultations"),
+                  el("span", "label", `${history.length} shown`));
+    card.append(header);
+    for (const h of history) {
+      const entry = el("div", "entry");
+      const head = el("div", "entry-head");
+      head.append(el("span", "date", h.date), el("span", "reason", h.reason),
+                  el("span", "by", h.by));
+      entry.append(head, el("p", null, h.summary));
+      card.append(entry);
+    }
+    return card;
+  }
+
+  // --- the live consultation ----------------------------------------
+
+  function renderConsult() {
+    const root = $("view-consult");
+    root.textContent = "";
+
+    const bound = first("patient_bound");
+    if (!bound) {
+      root.append(el("div", "empty", "No consultation in progress."));
+      return;
+    }
+    const p = bound.patient;
+
+    const head = el("div", "view-head");
+    head.append(el("h2", null, "Consultation"),
+                el("span", "sub", `${inProgress ? inProgress.time + " · " : ""}` +
+                                  `${inProgress ? inProgress.reason : ""}`));
+    root.append(head);
+
+    // Sticky identity — see the CSS note on wrong-patient harm.
+    const bar = el("div", "patient-bar");
+    bar.append(el("h2", null, p.name));
+    const facts = el("dl", "facts");
+    for (const [k, v] of [["Date of birth", `${p.dob} · ${p.age}`],
+                          ["Patient ID", p.id], ["NHS no.", p.nhs]]) {
+      const f = el("div", "fact");
+      f.append(el("dt", null, k), el("dd", null, v));
+      facts.append(f);
+    }
+    bar.append(facts);
+    const tag = el("span", "bound", "Bound to this consultation");
+    tag.title = bound.via;
+    bar.append(tag);
+    root.append(bar);
+
+    const cols = el("div", "cols");
+    const left = el("div", "col");
+    const right = el("div", "col");
+
+    // note + transcript
+    const noteCard = el("section", "card");
+    const noteHead = el("header");
+    noteHead.append(el("h3", "label", "Consultation note"),
+                    el("span", "label", "captured live"));
+    noteCard.append(noteHead);
+    for (const n of all("note")) {
+      const section = el("div", "note-section");
+      section.append(el("h4", null, n.section), el("p", null, n.text));
+      noteCard.append(section);
+    }
+    const said = all("said");
+    const details = el("details", "transcript");
+    details.append(el("summary", null, `Full transcript · ${said.length} lines`));
+    const body = el("div", "body");
+    for (const s of said) {
+      const line = el("div", "said");
+      line.dataset.who = s.who;
+      line.append(el("div", "who", s.name), el("div", "text", `“${s.text}”`));
+      body.append(line);
+    }
+    details.append(body);
+    noteCard.append(details);
+    left.append(noteCard);
+
+    // summary
+    const ended = first("consultation_ended");
+    if (ended) {
+      const card = el("section", "card");
+      card.append(headerOf("Summary"));
+      const b = el("div", "body");
+      b.append(el("p", "prose", ended.summary));
+      const tallies = el("div", "tallies");
+      for (const [kind, value, label] of [
+        ["written", ended.written, "records written"],
+        ["refused", ended.refused, "refused"],
+        ["reads", ended.reads, "records read"],
+        ["length", ended.duration_label, "consultation"],
+      ]) {
+        const t = el("div", "tally");
+        t.dataset.kind = kind;
+        t.append(el("b", null, String(value)), el("span", null, label));
+        tallies.append(t);
+      }
+      b.append(tallies);
+      card.append(b);
+      left.append(card);
+    }
+
+    // actions
+    const acted = EVENTS.filter(
+      (e) => e.type === "action_written" || e.type === "action_refused");
+    const proposals = new Map(all("action_proposed").map((x) => [x.action, x]));
+    const written = acted.filter((a) => a.type === "action_written").length;
+    const refused = acted.length - written;
+
+    const actCard = el("section", "card");
+    const actHead = el("header");
+    actHead.append(el("h3", "label", "Actions"),
+      el("span", "label", `${written} done${refused ? ` · ${refused} refused` : ""}`));
+    actCard.append(actHead);
+
+    for (const a of acted) {
+      const isRefusal = a.type === "action_refused";
+      const card = el("div", "action");
+      card.dataset.state = isRefusal ? "refused" : "written";
+
+      const h = el("div", "action-head");
+      h.append(el("span", "what", isRefusal
+        ? "Write to another patient's record"
+        : (proposals.get(a.action)?.summary || a.action)));
+      h.append(el("span", "state", isRefusal ? "Refused" : "Done"));
+      card.append(h);
+
+      if (isRefusal) {
+        card.append(el("p", "said-back", a.says));
+        const why = el("p", "why");
+        why.append(el("b", null, "Bound to: "), document.createTextNode(a.bound_subject));
+        why.append(document.createElement("br"));
+        why.append(el("b", null, "Asked for: "),
+                   document.createTextNode(a.attempted_subject));
+        card.append(why);
+        if (a.note) card.append(el("p", "why", a.note));
+      } else {
+        const lines = el("div", "lines");
+        for (const o of a.observed) {
+          const line = el("div", "line");
+          line.append(el("span", "app", o.app));
+          const bodyEl = el("div");
+          bodyEl.append(el("div", "what", o.what));
+          if (o.detail) bodyEl.append(el("div", "detail", o.detail));
+          line.append(bodyEl);
+          lines.append(line);
+        }
+        card.append(lines);
+        card.append(el("p", "confirmed",
+          `Confirmed by ${a.confirmed_by} · read back after writing`));
+      }
+      actCard.append(card);
+    }
+    right.append(actCard);
+
+    // access log
+    const reads = all("accessed").map((r) => ({ at: r.at, what: r.target,
+                                                effect: r.effect }));
+    const writes = acted.filter((a) => a.type === "action_written")
+      .flatMap((a) => a.observed.map((o) => ({ at: a.at, what: o.detail || o.what,
+                                              effect: "write" })));
+    const rows = [...reads, ...writes].sort((a, b) => a.at - b.at);
+
+    const accessCard = el("section", "card");
+    accessCard.append(headerOf("What was accessed"));
+    const accessBody = el("div", "body tight scroll-x");
+    const table = el("table", "access");
+    const thead = el("thead");
+    const hr = el("tr");
+    ["At", "Record", "Effect"].forEach((t) => hr.append(el("th", null, t)));
+    thead.append(hr);
+    const tbody = el("tbody");
+    for (const r of rows) {
+      const tr = el("tr");
+      tr.append(el("td", "t", clock(r.at)), el("td", null, r.what),
+                el("td", null, r.effect));
+      tbody.append(tr);
+    }
+    table.append(thead, tbody);
+    accessBody.append(table);
+    accessCard.append(accessBody);
+    right.append(accessCard);
+
+    cols.append(left, right);
+    root.append(cols);
+  }
+
+  function headerOf(text) {
+    const h = el("header");
+    h.append(el("h3", "label", text));
+    return h;
+  }
+
+  // --- approval ------------------------------------------------------
+  //
+  // The gate the whole product turns on: nothing reaches a patient without a human
+  // saying so. Two things make that a real check rather than a click.
+  //
+  // **Provenance.** Every claim links back to the utterance it came from, so approving
+  // is "is this what was said" — answerable in seconds — rather than "does this look
+  // plausible", which is not answerable at all. A claim citing nothing is flagged rather
+  // than hidden: an unsupported sentence in a medical letter is precisely what a reviewer
+  // must be pointed at.
+  //
+  // **Editability.** A reviewer who can only accept or reject will rubber-stamp. Edits
+  // are kept alongside the original, because the diff is the evidence the letter was
+  // actually read — and later it is the best training signal there is.
+
+  const draft = first("draft_ready");
+  const saidById = new Map(all("said").map((s) => [s.id, s]));
+
+  //: The send state machine. `holding` is a real delay with a working cancel, because
+  //: email cannot be unsent — a cancel window is the only undo that actually exists.
+  const send = { state: "draft", selected: null, edits: new Map(), confirmed: false,
+                 remaining: 0, timer: null };
+
+  const blocks = () => draft
+    ? [...draft.letter.paragraphs, ...draft.letter.todos, draft.letter.closing]
+    : [];
+  const textOf = (b) => (send.edits.has(b.id) ? send.edits.get(b.id) : b.text);
+  const unsourced = (b) => !b.sources.length && b.kind !== "courtesy";
+
+  function renderApprove() {
+    const root = $("view-approve");
+    root.textContent = "";
+
+    if (!draft) {
+      root.append(el("div", "empty", "Nothing waiting for approval."));
+      return;
+    }
+
+    const head = el("div", "view-head");
+    head.append(el("h2", null, "Approve before sending"),
+                el("span", "sub", `to ${draft.recipient.name} · drafted by ${draft.drafted_by}`));
+    root.append(head);
+
+    const cols = el("div", "cols");
+    cols.append(letterCol(), reviewCol());
+    root.append(cols);
+  }
+
+  function letterCol() {
+    const col = el("div", "col");
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "Patient letter"));
+
+    // Two documents, not one. Sending the clinical note to a patient is a real harm:
+    // "?postural hypotension 2° ramipril" is accurate and frightening to receive.
+    const tabs = el("div", "doc-tabs");
+    for (const [id, label] of [["letter", "Patient letter"], ["note", "Clinical note"]]) {
+      const b = el("button", null, label);
+      b.setAttribute("aria-current", String(send.doc !== "note" ? id === "letter" : id === "note"));
+      b.onclick = () => { send.doc = id; send.selected = null; renderApprove(); };
+      tabs.append(b);
+    }
+    header.append(tabs);
+    card.append(header);
+
+    const body = el("div", "body");
+    body.append(send.doc === "note" ? clinicalNote() : patientLetter());
+    card.append(body);
+    col.append(card);
+    return col;
+  }
+
+  function claimEl(block) {
+    const b = el("button", "claim");
+    b.dataset.block = block.id;
+    b.dataset.unsourced = String(unsourced(block));
+    b.setAttribute("aria-current", String(send.selected === block.id));
+
+    if (send.editing === block.id) {
+      const area = el("textarea");
+      area.value = textOf(block);
+      area.setAttribute("aria-label", "Edit this line");
+      area.onclick = (e) => e.stopPropagation();
+      area.onblur = () => {
+        const next = area.value.trim();
+        if (next && next !== block.text) send.edits.set(block.id, next);
+        else send.edits.delete(block.id);
+        send.editing = null;
+        renderApprove();
+      };
+      b.append(area);
+      setTimeout(() => area.focus(), 0);
+      return b;
+    }
+
+    b.append(document.createTextNode(textOf(block)));
+    if (unsourced(block)) {
+      const warn = el("span", "warn", "not in the transcript");
+      b.append(warn);
+    }
+    if (send.edits.has(block.id)) b.append(el("span", "edited", "edited"));
+    b.onclick = () => {
+      if (send.selected === block.id && send.state === "draft") send.editing = block.id;
+      else send.selected = block.id;
+      renderApprove();
+    };
+    return b;
+  }
+
+  function patientLetter() {
+    const L = draft.letter;
+    const wrap = el("div", "letter");
+    wrap.append(el("div", "subject", L.subject));
+    wrap.append(el("p", "greeting", L.greeting));
+    for (const p of L.paragraphs) wrap.append(claimEl(p));
+
+    wrap.append(el("p", "label", "Before your next visit"));
+    const ul = el("ul", "todos");
+    for (const t of L.todos) {
+      const li = el("li");
+      li.append(el("span", "tick"), claimEl(t));
+      ul.append(li);
+    }
+    wrap.append(ul);
+    wrap.append(claimEl(L.closing));
+    wrap.append(el("p", "signoff", L.sign_off));
+    // Without this a patient replies "my chest hurts" to a mailbox nobody reads.
+    wrap.append(el("p", "letter-foot", L.footer));
+    return wrap;
+  }
+
+  function clinicalNote() {
+    const wrap = el("div");
+    for (const n of all("note")) {
+      const section = el("div", "note-section");
+      section.append(el("h4", null, n.section));
+      const b = el("button", "claim");
+      b.dataset.block = `note-${n.section}`;
+      b.dataset.unsourced = "false";
+      b.setAttribute("aria-current", String(send.selected === `note-${n.section}`));
+      b.append(document.createTextNode(n.text));
+      b.onclick = () => {
+        send.selected = `note-${n.section}`;
+        send.sources = n.sources;
+        renderApprove();
+      };
+      section.append(b);
+      wrap.append(section);
+    }
+    wrap.append(el("p", "letter-foot",
+      "The clinical note goes to the record. It is never what the patient receives — " +
+      "same consultation, different audience."));
+    return wrap;
+  }
+
+  function reviewCol() {
+    const col = el("div", "col");
+    col.append(provenanceCard(), sendCard());
+    return col;
+  }
+
+  function provenanceCard() {
+    const card = el("section", "card");
+    card.append(headerOf("Where this came from"));
+    const body = el("div", "body");
+
+    const block = blocks().find((b) => b.id === send.selected);
+    const noteSources = send.selected && String(send.selected).startsWith("note-")
+      ? (send.sources || []) : null;
+    const sources = block ? block.sources : noteSources;
+
+    if (!sources) {
+      body.append(el("p", "prov-empty",
+        "Select any line in the letter to see the part of the conversation it was " +
+        "drawn from."));
+    } else if (!sources.length) {
+      const warn = el("div", "prov-warn");
+      warn.append(el("b", null, "Nothing in the transcript supports this."));
+      warn.append(document.createTextNode(
+        "The bot wrote it, but no part of the consultation says it. Edit or delete it " +
+        "before sending — click the line again to edit."));
+      body.append(warn);
+    } else {
+      for (const id of sources) {
+        const said = saidById.get(id);
+        if (!said) continue;
+        const row = el("div", "prov-said");
+        row.dataset.who = said.who;
+        const who = el("div", "who");
+        who.append(el("span", null, said.name), el("span", "at", clock(said.at)));
+        row.append(who, el("div", "text", `“${said.text}”`));
+        body.append(row);
+      }
+    }
+    card.append(body);
+    return card;
+  }
+
+  function sendCard() {
+    const card = el("section", "card");
+    card.append(headerOf(send.state === "sent" ? "Sent" : "Send to patient"));
+    const body = el("div", "body");
+
+    const flagged = blocks().filter(unsourced).length;
+    const edited = send.edits.size;
+
+    if (send.state === "sent") {
+      const mark = el("div", "sent-mark");
+      const t = el("div");
+      t.append(el("b", null, `Sent to ${draft.recipient.email}`));
+      t.append(el("span", "detail",
+        `Approved by ${DATA.clinician.name}` +
+        (edited ? ` · ${edited} line${edited > 1 ? "s" : ""} edited first` : "")));
+      mark.append(t);
+      body.append(mark);
+      if (edited) body.append(diffCard());
+      card.append(body);
+      return card;
+    }
+
+    const rec = el("div", "recipient");
+    rec.append(el("span", "label", "Recipient"));
+    rec.append(el("span", "addr", draft.recipient.email));
+    // Sending to the wrong address is the same failure class as the wrong-patient write,
+    // and worse: irreversible, and the data has left the building.
+    rec.append(el("span", "from-record",
+      `on ${draft.recipient.name}'s record · ${draft.recipient.verified_against}`));
+    body.append(rec);
+
+    if (send.state === "holding") {
+      const hold = el("div", "holding");
+      hold.append(el("span", "count", `${send.remaining}s`));
+      hold.append(el("span", "label", "Sending — you can still stop this"));
+      body.append(hold);
+      const cancel = el("button", "btn danger", "Cancel send");
+      cancel.onclick = () => {
+        clearInterval(send.timer);
+        send.state = "draft";
+        renderApprove();
+      };
+      body.append(cancel);
+      card.append(body);
+      return card;
+    }
+
+    if (flagged) {
+      const warn = el("div", "prov-warn");
+      warn.append(el("b", null,
+        `${flagged} statement${flagged > 1 ? "s" : ""} not traced to the conversation`));
+      warn.append(document.createTextNode(
+        "Review before approving — these were written by the bot with nothing in the " +
+        "consultation behind them."));
+      body.append(warn);
+      body.append(el("div", null, " "));
+    }
+
+    const label = el("label", "confirm");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = send.confirmed;
+    box.onchange = () => { send.confirmed = box.checked; renderApprove(); };
+    label.append(box, el("span", null,
+      `I have read this and it is correct for ${draft.recipient.name}.`));
+    body.append(label);
+
+    const go = el("button", "btn", `Approve and send to ${draft.recipient.name}`);
+    go.disabled = !send.confirmed;
+    go.onclick = () => {
+      send.state = "holding";
+      send.remaining = draft.hold_seconds;
+      send.timer = setInterval(() => {
+        send.remaining -= 1;
+        if (send.remaining <= 0) {
+          clearInterval(send.timer);
+          send.state = "sent";
+        }
+        if (view === "approve") renderApprove();
+      }, 1000);
+      renderApprove();
+    };
+    body.append(go);
+
+    body.append(el("p", "gate-note",
+      "Nothing is sent automatically. The bot drafts; a clinician approves; only then " +
+      "does it reach the patient."));
+    card.append(body);
+    return card;
+  }
+
+  function diffCard() {
+    const wrap = el("div", "diff");
+    wrap.append(el("h4", null, "Changed before sending"));
+    for (const b of blocks()) {
+      if (!send.edits.has(b.id)) continue;
+      wrap.append(el("div", "was", b.text));
+      wrap.append(el("div", "now", send.edits.get(b.id)));
+    }
+    return wrap;
+  }
+
+  $("foot").textContent =
+    "Synthetic patient data. Patient identity comes from the calendar invite the " +
+    "clinician sent, established before the meeting exists — never inferred from the " +
+    "call. Writes are confined to the patient this consultation is bound to.";
+
+  renderToday();
+  renderPatients();
+  renderConsult();
+  renderApprove();
+  show("approve");
+})();
+</script>

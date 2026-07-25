@@ -1,0 +1,15 @@
+# Nothing here is needed to run the demos or the test suite against the in-memory
+# adapter — that path is pure stdlib. These are for the real integrations.
+
+# Code generation (adapters/llm.py → ClaudeGenerator)
+anthropic>=0.120.0
+
+# Tests
+pytest>=9.0
+
+# --- not yet imported by any module; uncomment when the adapter is written -----
+# Scoped execution via Scalekit. Package name confirmed on PyPI (latest 2.15.0 as of
+# 2026-07-25); bare `scalekit` does not exist.
+# scalekit-sdk-python>=2.15.0
+
+# MeetStream has no official Python SDK; its API is plain HTTP.

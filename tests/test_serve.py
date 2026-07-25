@@ -1,0 +1,393 @@
+"""The web layer, driven over real HTTP.
+
+A real socket and a real cookie jar, because the things most likely to be wrong here are
+things a unit test on the handler would not see: cookie attributes, redirect targets,
+and whether an unauthenticated request can reach a file it shouldn't.
+"""
+
+import http.cookiejar
+import json
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from skillforge.adapters.auth import AuthError, Session
+from skillforge.ui.serve import COOKIE, SessionStore, make_server
+
+SESSION = Session(identifier="priya.rao@clinic.test", email="priya.rao@clinic.test",
+                  name="Dr Priya Rao", access_token="at_secret",
+                  refresh_token="rt_secret", id_token="it_secret")
+
+
+class FakeAuth:
+    """Stands in for the Scalekit-backed Auth, with the same surface."""
+
+    def __init__(self, *, configured=True, fail_callback=None):
+        self.configured = configured
+        self.fail_callback = fail_callback
+        self.states: list[str] = []
+        self.seen: dict = {}
+
+    def login_url(self):
+        if not self.configured:
+            raise AuthError("missing credentials: SCALEKIT_CLIENT_ID")
+        state = f"state-{len(self.states)}"
+        self.states.append(state)
+        return f"https://auth.example/authorize?state={state}", state
+
+    def callback(self, *, code, state):
+        self.seen["code"], self.seen["state"] = code, state
+        if self.fail_callback:
+            raise AuthError(self.fail_callback)
+        if state not in self.states:
+            raise AuthError("unrecognised state — refusing this callback")
+        return SESSION
+
+    def logout_url(self, session, *, redirect_to=None):
+        self.seen["logout_redirect"] = redirect_to
+        return "https://auth.example/logout"
+
+
+@pytest.fixture
+def site(tmp_path):
+    """A running server, plus a client that keeps cookies like a browser."""
+    root = tmp_path / "build"
+    root.mkdir()
+    (root / "consult.html").write_text("<h1>Consultation</h1>")
+    (root / "events.json").write_text('{"ok": true}')
+    (tmp_path / "secret.txt").write_text("must never be served")
+
+    made = {}
+
+    def _make(**kwargs):
+        auth = kwargs.pop("auth", None) or FakeAuth()
+        store = SessionStore()
+        server = make_server(root=root, auth=auth, host="127.0.0.1", port=0,
+                            store=store, **kwargs)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar), NoRedirect())
+
+        made.update(server=server, auth=auth, store=store, base=base, jar=jar,
+                    opener=opener, root=root)
+        return made
+
+    yield _make
+    if "server" in made:
+        made["server"].shutdown()
+        made["server"].server_close()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow nothing — the redirect targets are what's under test."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def fetch(made, path, *, follow=False):
+    opener = (urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(made["jar"])) if follow else made["opener"])
+    try:
+        return opener.open(made["base"] + path)
+    except urllib.error.HTTPError as e:
+        return e
+
+
+def cookie_header(response):
+    return response.headers.get("Set-Cookie") or ""
+
+
+def sign_in(made):
+    """Complete a login, leaving the jar holding a session cookie."""
+    fetch(made, "/auth/login")
+    state = made["auth"].states[-1]
+    return fetch(made, f"/auth/callback?code=abc&state={state}")
+
+
+# --- the gate ---------------------------------------------------------------
+
+
+def test_an_unauthenticated_request_is_sent_to_login(site):
+    made = site()
+    r = fetch(made, "/")
+
+    assert r.status == 302
+    assert r.headers["Location"] == "/auth/login"
+
+
+def test_the_page_itself_is_not_reachable_unauthenticated(site):
+    """The redirect must not be cosmetic — the file must not be served."""
+    made = site()
+    r = fetch(made, "/consult.html")
+
+    assert r.status == 302
+    assert b"Consultation" not in (r.read() or b"")
+
+
+def test_data_files_are_behind_the_gate_too(site):
+    made = site()
+    assert fetch(made, "/events.json").status == 302
+
+
+def test_public_paths_can_be_opted_out(site):
+    made = site(public_paths=frozenset({"/events.json"}))
+    r = fetch(made, "/events.json")
+    assert r.status == 200
+    assert json.loads(r.read())["ok"] is True
+
+
+# --- login ------------------------------------------------------------------
+
+
+def test_login_redirects_to_the_provider(site):
+    made = site()
+    r = fetch(made, "/auth/login")
+
+    assert r.status == 302
+    assert r.headers["Location"].startswith("https://auth.example/authorize")
+
+
+def test_login_says_so_plainly_when_unconfigured(site):
+    """A 503 naming the missing variables beats a stack trace or a blank redirect."""
+    made = site(auth=FakeAuth(configured=False))
+    r = fetch(made, "/auth/login")
+
+    assert r.status == 503
+    body = r.read().decode()
+    assert "SCALEKIT_CLIENT_ID" in body
+    assert ".env" in body
+
+
+def test_an_unconfigured_server_still_refuses_entry(site):
+    """Failing open would be the worst possible response to missing credentials."""
+    made = site(auth=FakeAuth(configured=False))
+    assert fetch(made, "/").status == 302
+
+
+# --- the callback and the cookie -------------------------------------------
+
+
+def test_a_successful_callback_sets_a_session_cookie_and_lands_home(site):
+    made = site()
+    r = sign_in(made)
+
+    assert r.status == 302
+    assert r.headers["Location"] == "/"
+    assert made["auth"].seen["code"] == "abc"
+    assert len(made["store"]) == 1
+
+
+def test_the_cookie_is_httponly_lax_and_scoped(site):
+    made = site()
+    header = cookie_header(sign_in(made))
+
+    assert COOKIE in header
+    assert "HttpOnly" in header, "script-readable session cookie"
+    assert "SameSite=Lax" in header, "Strict would drop the cookie on the callback hop"
+    assert "Path=/" in header
+    assert "Max-Age=" in header
+
+
+def test_the_cookie_is_not_marked_secure_over_plain_http(site):
+    """Localhost is HTTP; a Secure flag would stop the browser storing it at all, and the
+    symptom is a login that loops."""
+    made = site()
+    assert "Secure" not in cookie_header(sign_in(made))
+
+
+def test_the_cookie_carries_an_opaque_id_not_a_token(site):
+    """A stolen cookie must be worth nothing once the session is dropped."""
+    made = site()
+    header = cookie_header(sign_in(made))
+
+    for secret in ("at_secret", "rt_secret", "it_secret"):
+        assert secret not in header
+    assert "priya" not in header.lower(), "cookie leaks who the user is"
+
+
+def test_a_bad_state_is_rejected_with_no_session_created(site):
+    made = site()
+    fetch(made, "/auth/login")
+    r = fetch(made, "/auth/callback?code=abc&state=forged")
+
+    assert r.status == 400
+    assert len(made["store"]) == 0
+    assert COOKIE not in cookie_header(r)
+
+
+def test_a_declined_sign_in_reports_the_providers_reason(site):
+    made = site()
+    r = fetch(made, "/auth/callback?error=access_denied")
+
+    assert r.status == 400
+    assert "access_denied" in r.read().decode()
+    assert len(made["store"]) == 0
+
+
+def test_a_failed_exchange_does_not_create_a_session(site):
+    made = site(auth=FakeAuth(fail_callback="token rejected"))
+    fetch(made, "/auth/login")
+    r = fetch(made, f"/auth/callback?code=abc&state={made['auth'].states[-1]}")
+
+    assert r.status == 400
+    assert len(made["store"]) == 0
+
+
+# --- signed in --------------------------------------------------------------
+
+
+def test_the_page_is_served_once_signed_in(site):
+    made = site()
+    sign_in(made)
+    r = fetch(made, "/", follow=True)
+
+    assert r.status == 200
+    assert b"Consultation" in r.read()
+
+
+def test_me_returns_the_public_view_and_no_tokens(site):
+    made = site()
+    sign_in(made)
+    r = fetch(made, "/me", follow=True)
+
+    body = r.read().decode()
+    payload = json.loads(body)
+    assert payload["identifier"] == "priya.rao@clinic.test"
+    assert payload["initials"] == "DP"
+    for secret in ("at_secret", "rt_secret", "it_secret"):
+        assert secret not in body
+
+
+def test_me_is_401_when_signed_out(site):
+    made = site()
+    r = fetch(made, "/me")
+    assert r.status == 401
+    assert json.loads(r.read())["identifier"] is None
+
+
+def test_an_unknown_cookie_is_treated_as_signed_out(site):
+    made = site()
+    request = urllib.request.Request(made["base"] + "/me",
+                                     headers={"Cookie": f"{COOKIE}=made-up"})
+    try:
+        urllib.request.urlopen(request)
+        assert False, "a forged cookie was accepted"
+    except urllib.error.HTTPError as e:
+        assert e.status == 401
+
+
+def test_an_expired_session_is_treated_as_signed_out(site):
+    made = site()
+    sign_in(made)
+    made["store"].ttl = -1                       # everything is now in the past
+    sid = next(iter(made["store"]._rows))
+    made["store"]._rows[sid] = (SESSION, 0.0)
+
+    assert made["store"].get(sid) is None
+    assert fetch(made, "/").status == 302
+
+
+# --- logout -----------------------------------------------------------------
+
+
+def test_logout_drops_the_session_and_clears_the_cookie(site):
+    made = site()
+    sign_in(made)
+    assert len(made["store"]) == 1
+
+    r = fetch(made, "/auth/logout", follow=False)
+
+    assert r.status == 302
+    assert len(made["store"]) == 0, "session survived logout server-side"
+    assert "Max-Age=0" in cookie_header(r)
+    assert r.headers["Location"] == "https://auth.example/logout"
+
+
+def test_logout_still_works_when_the_provider_call_fails(site):
+    """Being unable to reach the provider must not leave someone signed in locally."""
+    class Broken(FakeAuth):
+        def logout_url(self, session, *, redirect_to=None):
+            raise RuntimeError("provider unreachable")
+
+    made = site(auth=Broken())
+    sign_in(made)
+    r = fetch(made, "/auth/logout")
+
+    assert r.status == 302
+    assert r.headers["Location"] == "/"
+    assert len(made["store"]) == 0
+
+
+def test_logout_while_signed_out_is_harmless(site):
+    made = site()
+    r = fetch(made, "/auth/logout")
+    assert r.status == 302
+
+
+# --- static serving ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("attack", [
+    "/../secret.txt",
+    "/%2e%2e/secret.txt",
+    "/subdir/../../secret.txt",
+])
+def test_path_traversal_cannot_escape_the_build_directory(site, attack):
+    """Custom routing means no inherited traversal protection, so this is explicit."""
+    made = site()
+    sign_in(made)
+    r = fetch(made, attack, follow=True)
+
+    assert r.status in (403, 404), f"{attack} returned {r.status}"
+    assert b"must never be served" not in (r.read() or b"")
+
+
+def test_a_missing_file_is_a_404_not_a_crash(site):
+    made = site()
+    sign_in(made)
+    assert fetch(made, "/nope.js", follow=True).status == 404
+
+
+def test_the_page_is_served_uncached(site):
+    """It changes while open; a cached copy makes the UI look frozen."""
+    made = site()
+    sign_in(made)
+    r = fetch(made, "/", follow=True)
+    assert "no-store" in r.headers.get("Cache-Control", "")
+
+
+# --- the session store on its own -------------------------------------------
+
+
+def test_ids_are_unguessable_and_unique():
+    store = SessionStore()
+    ids = {store.put(SESSION) for _ in range(50)}
+    assert len(ids) == 50
+    assert all(len(i) > 30 for i in ids)
+
+
+def test_a_supplied_store_is_the_one_actually_used(tmp_path):
+    """Regression. An empty SessionStore is falsy — it defines __len__ — so `store or
+    SessionStore()` handed the server a different store than the caller's, and sessions
+    landed somewhere nobody was looking."""
+    store = SessionStore()
+    server = make_server(root=tmp_path, auth=FakeAuth(), port=0, store=store)
+    try:
+        assert server.RequestHandlerClass.store is store
+    finally:
+        server.server_close()
+
+
+def test_dropping_an_unknown_id_is_harmless():
+    store = SessionStore()
+    store.drop("nothing")
+    store.drop(None)
+    assert len(store) == 0

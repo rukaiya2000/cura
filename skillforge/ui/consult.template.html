@@ -1,4 +1,4 @@
-<title>Forge — consultation assistant</title>
+<title>Cura — consultation assistant</title>
 
 <style>
   /* ---------------------------------------------------------------------
@@ -126,8 +126,46 @@
   .top .who b { display: block; }
   .top .who span { color: var(--ink-3); font-size: var(--step--1); }
 
-  /* Hidden until /me confirms a real session — a dead sign-out link on a page opened
-     straight off disk is worse than no link at all. */
+  /* Always present. It used to hide itself until /me confirmed a session, which meant
+     the published demo — a static file with no server behind it — showed no way to sign
+     out at all, and looked like the feature was missing rather than unreachable. With no
+     server the control runs the flow in-page instead, and the Preview chip says why. */
+  .preview-chip {
+    padding: 0.15rem 0.5rem; border-radius: 999px;
+    border: 1px solid var(--rule-strong); color: var(--ink-3);
+    font: 600 0.68rem var(--sans); letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  .preview-chip[hidden] { display: none; }
+  .preview-chip[data-tone="warn"] {
+    color: var(--attention); border-color: var(--attention);
+    background: rgba(150, 96, 11, 0.07); cursor: help;
+  }
+
+  /* The signed-out state, shown in place of the app when there is no server to really
+     sign out of. Deliberately the same card as the real sign-in screen. */
+  .signed-out {
+    position: fixed; inset: 0; z-index: 10;
+    display: grid; place-items: center; padding: 1.5rem;
+    background: var(--ground);
+  }
+  .signed-out .card { width: 100%; max-width: 25rem; padding: 1.5rem; text-align: center; }
+  .signed-out .mark {
+    display: grid; place-items: center; width: 2.4rem; height: 2.4rem;
+    margin: 0 auto 0.9rem; border-radius: var(--radius);
+    background: var(--accent); color: #fff; font: 700 var(--step-1) var(--sans);
+  }
+  .signed-out h2 { font-size: var(--step-2); margin-bottom: 0.4rem; }
+  .signed-out p { color: var(--ink-2); margin-bottom: 1.2rem; }
+  .signed-out .note {
+    margin: 1rem 0 0; padding-top: 0.9rem; border-top: 1px solid var(--rule);
+    color: var(--ink-3); font-size: var(--step--1); line-height: 1.5;
+  }
+  .signed-out button {
+    width: 100%; padding: 0.7rem 1rem; border-radius: var(--radius);
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    font: 600 var(--step-0) var(--sans); cursor: pointer;
+  }
+
   .signout {
     color: var(--ink-3); font-size: var(--step--1); text-decoration: none;
     padding: 0.25rem 0.6rem; border: 1px solid var(--rule); border-radius: 999px;
@@ -583,17 +621,18 @@
 
 <div class="app">
   <div class="brand">
-    <span class="mark" aria-hidden="true">F</span>
+    <span class="mark" aria-hidden="true">C</span>
     <div>
-      <b>Forge</b><br />
+      <b>Cura</b><br />
       <span>Consultation assistant</span>
     </div>
   </div>
 
   <div class="top">
     <div class="who" id="who"></div>
+    <span class="preview-chip" id="preview-chip" hidden>Preview</span>
     <div class="avatar" id="avatar" aria-hidden="true"></div>
-    <a class="signout" id="signout" href="/auth/logout" hidden>Sign out</a>
+    <a class="signout" id="signout" href="/auth/logout">Sign out</a>
   </div>
 
   <nav class="rail" aria-label="Practice">
@@ -654,17 +693,67 @@
   renderWho(DATA.clinician.name, DATA.clinician.initials,
             [DATA.clinician.role, DATA.today]);
 
+  // Preview until proven otherwise: if /me answers there is a real session behind this
+  // page, and Sign out ends it for real. If it does not answer — a published static
+  // build, or the file opened straight off disk — the control still works, but it can
+  // only demonstrate the flow rather than perform it, and says so.
+  let live = false;
+
   fetch("/me", { credentials: "same-origin", cache: "no-store" })
     .then((r) => (r.ok ? r.json() : null))
     .then((me) => {
-      if (!me || !me.identifier) return;
+      if (!me || !me.identifier) throw new Error("no session");
+      live = true;
+      $("preview-chip").hidden = true;
       // The identifier is shown, not just the name: it is the string every tool call runs
       // under, so seeing it is how the doctor knows *which* connected account is acting.
       renderWho(me.name, me.initials,
                 [DATA.clinician.role, me.identifier, DATA.today]);
-      $("signout").hidden = false;
+
+      // An identifier that is not an email means the token carried no email claim and
+      // fell back to `sub`. Sign-in still succeeds, so nothing looks wrong — but the
+      // connected accounts are filed under an address, so every tool call will miss.
+      // Failing at the point of *acting* is the worst place to discover this, so say it
+      // here instead.
+      if (me.identifies_by_email === false) {
+        const chip = $("preview-chip");
+        chip.textContent = "Identifier is not an email";
+        chip.dataset.tone = "warn";
+        chip.title = `Signed in as ${me.identifier}. Connected accounts are filed under ` +
+                     `an email address, so tool calls made under this identifier will ` +
+                     `not find one. Set an email on this user in Scalekit.`;
+        chip.hidden = false;
+      }
     })
-    .catch(() => {});                 // no server, or offline: the baked-in header stands
+    .catch(() => { $("preview-chip").hidden = false; });
+
+  $("signout").onclick = (e) => {
+    if (live) return;               // a real session: let the link reach /auth/logout
+    e.preventDefault();
+    showSignedOut();
+  };
+
+  function showSignedOut() {
+    const veil = el("div", "signed-out");
+    const card = el("section", "card");
+    card.append(el("div", "mark", "C"));
+    card.append(el("h2", null, "You have been signed out"));
+    card.append(el("p", null, "Your session on this device has ended."));
+
+    const back = el("button", null, "Sign back in");
+    back.onclick = () => veil.remove();
+    card.append(back);
+
+    // Say plainly what just happened. Claiming a server session was destroyed when there
+    // is no server would make the demo a lie about the one thing it is demonstrating.
+    card.append(el("p", "note",
+      "This is the published preview, so there is no server session to end — this shows " +
+      "what signing out looks like. Run the app locally and Sign out really does drop " +
+      "the session, and the cookie you were holding stops working."));
+
+    veil.append(card);
+    document.body.append(veil);
+  }
 
   const TABS = [
     { id: "today", label: "Today", count: () => DATA.schedule.length },

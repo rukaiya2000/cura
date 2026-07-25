@@ -32,6 +32,11 @@ from typing import Any
 
 DEFAULT_SCOPES = "openid profile email offline_access"
 
+#: Used when a verified token carries no name at all. Named rather than
+#: inline because `initials` must recognise it: an avatar reading "C" for
+#: "Clinician" looks like a real initial and hides that identity is missing.
+FALLBACK_NAME = "Clinician"
+
 
 class AuthError(Exception):
     """Login could not be completed. Never carries a token in its message."""
@@ -56,13 +61,37 @@ class Session:
 
     @property
     def initials(self) -> str:
-        parts = [p for p in self.name.replace(".", " ").split() if p]
-        return "".join(p[0] for p in parts[:2]).upper() or self.email[:2].upper()
+        """Two letters for the avatar, from whatever identity actually arrived.
+
+        An email is split on its local part rather than the whole string: taking the first
+        two words of "rukaiyak2000@gmail.com" gives "RC", where the C is from "com" — a
+        letter from the domain, which is nobody's initial.
+        """
+        source = self.name if self.name and self.name != FALLBACK_NAME else ""
+        if "@" in source or not source:
+            source = (self.email or self.identifier or "").split("@")[0]
+        parts = [p for p in source.replace(".", " ").replace("_", " ").split() if p]
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[1][0]).upper()
+        letters = "".join(ch for ch in (parts[0] if parts else "") if ch.isalpha())
+        return (letters[:2] or "??").upper()
+
+    @property
+    def identifies_by_email(self) -> bool:
+        """Whether the identifier is an address a connected account is likely filed under.
+
+        When a token carries no email claim the identifier falls back to `sub` — an opaque
+        `usr_…` string. The login still works, so nothing looks wrong, but every tool call
+        then runs under a name no connected account was created with, and fails at the
+        point of acting rather than the point of signing in. The UI surfaces this.
+        """
+        return "@" in self.identifier
 
     def public(self) -> dict:
         """What may safely reach the browser — no tokens, ever."""
         return {"identifier": self.identifier, "email": self.email,
-                "name": self.name, "initials": self.initials}
+                "name": self.name, "initials": self.initials,
+                "identifies_by_email": self.identifies_by_email}
 
 
 def _client():
@@ -97,7 +126,7 @@ def _subject(claims: dict) -> tuple[str, str, str]:
     name = (claims.get("name")
             or " ".join(filter(None, [claims.get("given_name"),
                                       claims.get("family_name")])).strip()
-            or email or "Clinician")
+            or email or FALLBACK_NAME)
     identifier = email or claims.get("sub") or ""
     if not identifier:
         raise AuthError("token carried no email or subject — cannot derive an identifier")
@@ -123,11 +152,17 @@ class Auth:
 
     # --- leaving ------------------------------------------------------------
 
-    def login_url(self) -> tuple[str, str]:
+    def login_url(self, *, signup: bool = False) -> tuple[str, str]:
         """The URL to send the browser to, and the `state` that must come back.
 
         `state` is generated here and checked on return — without it, anyone can hand the
         callback a code of their choosing and log the victim into an attacker's account.
+
+        `signup=True` sets `prompt=create`, which lands on Scalekit's account-creation
+        screen instead of its sign-in screen. It is a *hint about which screen to show*,
+        not a separate flow: the callback, the token exchange and the session that comes
+        back are identical either way, so nothing downstream has to know which button was
+        pressed. Treating sign-up as its own pipeline is how the two drift apart.
         """
         from scalekit.common.scalekit import AuthorizationUrlOptions
 
@@ -135,6 +170,8 @@ class Auth:
         options = AuthorizationUrlOptions()
         options.scopes = self.scopes
         options.state = state
+        if signup:
+            options.prompt = "create"
 
         url = self.client.get_authorization_url(self.redirect_uri, options)
         self._pending.add(state)
@@ -167,7 +204,20 @@ class Auth:
         # `user` object — that is the difference between trusting a signature and trusting
         # whatever came back over the wire. The response `user` is deliberately not passed
         # anywhere near `_subject`; see the note there.
+        #
+        # Two tokens, both verified, because they carry different things. The access token
+        # proves the session; OIDC puts `name` and `email` in the **id token**. Reading
+        # identity from the access token alone produced a live session displaying
+        # "Clinician" with an opaque `usr_…` identifier — and since that identifier is what
+        # every tool call runs under, it silently failed to match the connected account
+        # filed under the doctor's email.
         claims = self._claims(access)
+        id_token = _get(result, "id_token") or ""
+        if id_token:
+            claims = {**self._id_claims(id_token), **{k: v for k, v in claims.items() if v}}
+            # Access-token claims win only where they are actually populated, so a `sub`
+            # from the access token stays authoritative while `email` and `name` come from
+            # the id token that carries them.
         identifier, email, name = _subject(claims)
 
         return Session(
@@ -209,6 +259,22 @@ class Auth:
         )))
 
     # --- verification -------------------------------------------------------
+
+    def _id_claims(self, id_token: str) -> dict:
+        """Verify the id token and return its claims — or `{}` if it will not verify.
+
+        Verified, not decoded. Reading an unverified JWT payload for `email` would hand
+        an attacker the identifier through the back door, which is exactly the hole closed
+        in `_subject`. A token that fails validation contributes nothing rather than
+        contributing something unchecked.
+
+        Failure is soft because this only *enriches* identity: the access token has already
+        established who this is. Losing a display name is not a reason to fail a login.
+        """
+        try:
+            return _as_dict(self.client.validate_token(id_token))
+        except Exception:  # noqa: BLE001 — enrichment only; the access token stands alone
+            return {}
 
     def _claims(self, token: str) -> dict:
         """Verify the token and return its claims.

@@ -46,7 +46,7 @@ def main() -> int:
     missing = [k for k in ("SCALEKIT_ENVIRONMENT_URL", "SCALEKIT_CLIENT_ID",
                            "SCALEKIT_CLIENT_SECRET") if not get(k)]
 
-    print(f"\n{BOLD}Forge — consultation assistant{OFF}")
+    print(f"\n{BOLD}Cura — consultation assistant{OFF}")
     print(f"  {origin}")
     if missing:
         print(f"\n  {AMBER}login not configured{OFF} — missing {', '.join(missing)}")
@@ -62,7 +62,9 @@ def main() -> int:
                          host=args.host, port=args.port)
     if not args.no_browser:
         try:
-            webbrowser.open(f"{origin}/auth/login")
+            # `/`, not `/auth/login`. Going straight to the provider skips the page that
+            # explains what this is, which is the one thing a first-time visitor needs.
+            webbrowser.open(origin)
         except Exception:
             pass
     try:

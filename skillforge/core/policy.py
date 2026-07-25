@@ -85,6 +85,32 @@ class Policy:
         """
         return [t for t in tools if self.permits_primitive(t["definition"]["name"])]
 
+    def constraints(self) -> list[str]:
+        """The manifest-level ceilings, phrased for whoever is writing the skill.
+
+        `filter_primitives` already removes banned capabilities before generation, so
+        policy costs nothing at runtime for *those*. The manifest rules had no equivalent:
+        they were enforced only after the model had written something, which is how a live
+        run burned three attempts oscillating between `reversible: true, inverse: null`
+        (rejected by the manifest) and `reversible: false` (rejected by this policy). Both
+        rejections were correct and neither was knowable in advance. Now they are stated
+        up front, so the common case is that no refusal happens because no attempt did.
+        """
+        out: list[str] = []
+        if self.deny_effects:
+            banned = ", ".join(sorted(e.value for e in self.deny_effects))
+            out.append(f"Do not write a skill whose effects are: {banned}.")
+        if self.require_reversible:
+            need = ", ".join(sorted(e.value for e in self.require_reversible))
+            out.append(
+                f"A skill with effects {need} must set `reversible` true and name its "
+                "inverse skill in `inverse`. If the action genuinely cannot be undone, "
+                "this policy will not permit it at all."
+            )
+        if self.max_primitives is not None:
+            out.append(f"Use at most {self.max_primitives} primitives.")
+        return out
+
     def permits_primitive(self, primitive: str) -> bool:
         if primitive in self.deny_primitives:
             return False

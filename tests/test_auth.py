@@ -185,7 +185,8 @@ def test_the_public_view_carries_no_tokens():
     session = auth.callback(code="abc", state=login(auth))
     public = session.public()
 
-    assert set(public) == {"identifier", "email", "name", "initials"}
+    assert set(public) == {"identifier", "email", "name", "initials",
+                           "identifies_by_email"}
     blob = repr(public)
     for secret in ("at_live", "rt_live", "it_live"):
         assert secret not in blob
@@ -289,3 +290,78 @@ def test_an_unverified_user_payload_can_never_become_the_identifier():
         assert "evil" not in session.identifier
         assert "evil" not in session.email
         assert "Someone Else" not in session.name
+
+
+# --- identity that actually arrives ------------------------------------------
+
+
+def test_profile_claims_are_taken_from_the_verified_id_token():
+    """OIDC puts `name` and `email` in the id token, not the access token. Reading identity
+    from the access token alone produced a live session displaying "Clinician" with an
+    opaque `usr_…` identifier — and that identifier is what every tool call runs under."""
+    class SplitTokens(FakeClient):
+        def validate_access_token_and_get_claims(self, token):
+            return {"sub": "usr_9912"}                  # access token: no profile claims
+        def validate_token(self, token):
+            assert token == "it_live", token
+            return {"sub": "usr_9912", "email": "Priya.Rao@clinic.test",
+                    "name": "Dr Priya Rao"}
+
+    auth = Auth(redirect_uri="http://localhost/cb", client=SplitTokens())
+    session = auth.callback(code="abc", state=login(auth))
+
+    assert session.identifier == "priya.rao@clinic.test"
+    assert session.name == "Dr Priya Rao"
+    assert session.initials == "DP"
+
+
+def test_an_id_token_that_will_not_verify_contributes_nothing():
+    """Verified, not decoded. Reading an unverified JWT for `email` would hand an attacker
+    the identifier through the back door — the same hole closed in `_subject`."""
+    class BadIdToken(FakeClient):
+        def validate_access_token_and_get_claims(self, token):
+            return {"sub": "usr_9912"}
+        def validate_token(self, token):
+            raise ValueError("signature mismatch")
+
+    auth = Auth(redirect_uri="http://localhost/cb", client=BadIdToken())
+    session = auth.callback(code="abc", state=login(auth))
+
+    assert session.identifier == "usr_9912", "an unverifiable token changed the identity"
+    assert "evil" not in session.email
+
+
+def test_an_unverifiable_id_token_does_not_fail_the_login():
+    """It only enriches identity; the access token already established who this is.
+    Losing a display name is not a reason to refuse someone entry."""
+    class BadIdToken(FakeClient):
+        def validate_token(self, token):
+            raise ValueError("nope")
+
+    auth = Auth(redirect_uri="http://localhost/cb", client=BadIdToken())
+    assert auth.callback(code="abc", state=login(auth)).identifier
+
+
+def test_a_subject_only_identifier_is_flagged_for_the_ui():
+    """It signs in fine and then fails at the point of acting, which is the worst place to
+    find out — connected accounts are filed under an address."""
+    auth, _ = auth_for(claims={"sub": "usr_9912"})
+    session = auth.callback(code="abc", state=login(auth))
+
+    assert session.identifies_by_email is False
+    assert session.public()["identifies_by_email"] is False
+
+
+def test_initials_never_take_a_letter_from_an_email_domain():
+    """"rukaiyak2000@gmail.com" split on whitespace gives "RC" — the C is from "com"."""
+    s = Session(identifier="rukaiyak2000@gmail.com", email="rukaiyak2000@gmail.com",
+                name="rukaiyak2000@gmail.com")
+    assert s.initials == "RU"
+
+
+def test_initials_do_not_dress_up_a_missing_name():
+    """The fallback name is "Clinician"; showing "C" reads as a real initial and hides
+    that no identity arrived at all."""
+    s = Session(identifier="usr_9912", email="", name="Clinician")
+    assert s.initials != "C"
+    assert s.initials == "U9"

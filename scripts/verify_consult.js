@@ -113,9 +113,28 @@ async function main() {
     assert(text("#who span").includes(DATA.today), "today's date missing from the header");
   });
 
-  t("sign-out stays hidden with no session", () =>
-    assert(doc.getElementById("signout").hidden,
-           "a dead sign-out link is offered with no server behind it"));
+  t("sign-out is offered even with no server behind the page", () => {
+    // Regression. It used to hide itself until /me answered, so the published build —
+    // a static file, no server — showed no way to sign out and looked like the feature
+    // did not exist rather than being unreachable.
+    assert(!doc.getElementById("signout").hidden, "no sign-out control");
+    assert(!doc.getElementById("preview-chip").hidden,
+           "no Preview chip to explain why this build cannot end a real session");
+  });
+
+  t("signing out in preview shows the flow and admits it is a preview", () => {
+    doc.getElementById("signout").dispatchEvent(
+      new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    const veil = doc.querySelector(".signed-out");
+    assert(veil, "sign-out did nothing");
+    assert(/signed out/i.test(veil.textContent));
+    // Claiming a server session was destroyed when there is no server would make the
+    // demo a lie about the thing it is demonstrating.
+    assert(/no server session to end/i.test(veil.textContent),
+           "the preview claims to have ended a session it never had");
+    veil.querySelector("button").click();
+    assert(!doc.querySelector(".signed-out"), "cannot get back in");
+  });
 
   // --- the consultation, which is the view the page opens on ---------------
 
@@ -525,8 +544,18 @@ async function main() {
            "the identifier every tool call runs under is not shown");
   });
 
-  t("sign-out appears only once there is a session to end", () =>
-    assert(!live.doc.getElementById("signout").hidden, "sign-out still hidden"));
+  t("a real session drops the Preview chip", () =>
+    assert(live.doc.getElementById("preview-chip").hidden,
+           "still labelled a preview while a real session is attached"));
+
+  t("with a real session sign-out is left to the server, not intercepted", () => {
+    const ev = new live.window.MouseEvent("click", { bubbles: true, cancelable: true });
+    live.doc.getElementById("signout").dispatchEvent(ev);
+    assert(!ev.defaultPrevented,
+           "the page swallowed the click instead of letting /auth/logout run");
+    assert(!live.doc.querySelector(".signed-out"),
+           "showed a fake signed-out screen instead of really signing out");
+  });
 
   t("sign-out points at the logout route", () =>
     assert(live.doc.getElementById("signout").getAttribute("href") === "/auth/logout"));

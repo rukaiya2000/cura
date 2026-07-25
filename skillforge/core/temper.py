@@ -103,6 +103,14 @@ def _run_check(test_source: str, result, calls) -> str | None:
     try:
         exec(compile(test_source, "<skill-test>", "exec"), namespace)
     except BaseException as e:  # noqa: BLE001
+        # The reason has to tell the next attempt what to *do*, because it is fed straight
+        # back to the generator. "ImportError: __import__ not found" is true and useless —
+        # a model reading it cannot tell that the rule is "no imports here at all", which
+        # is stricter than the skill's own allowlist because this runs on the host.
+        if isinstance(e, ImportError):
+            return ("test module did not load: the test may not import anything — it "
+                    "receives `result` and `calls` as plain lists and dicts, so assert "
+                    "on them directly")
         return f"test module did not load: {type(e).__name__}: {e}"
 
     check = namespace.get("check")

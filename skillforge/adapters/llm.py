@@ -54,13 +54,20 @@ Design rules:
 7. Declare every primitive you call in `primitives_used`, and call every primitive you
    declare. An undeclared call is a hard failure.
 8. `effects` is the strongest thing the skill does: `read`, `write`, or `destructive`.
-9. If the skill can be undone, set `reversible` true and name the inverse skill in
-   `inverse`; otherwise `reversible` false and `inverse` null.
+9. `reversible` and `inverse` go together, always. If you set `reversible` true you must
+   name the inverse skill in `inverse` — the two are one declaration and a manifest with
+   one but not the other is rejected. Prefer making a write reversible and naming its
+   inverse; only set `reversible` false when the effect genuinely cannot be undone.
 
 Also write the test that earns the skill its trust: a single
 `def check(result, calls):` that asserts against the returned value and the call log.
 `calls` is a list of `{"primitive", "input", "ok", "error"}` dicts in execution order.
 Assert observable outcomes, not implementation details. Use plain `assert` with a message.
+
+The test module **may not import anything at all** — not even from the list above. It
+receives `result` and `calls` as plain lists and dicts, so it needs nothing but `assert`
+and the builtins. This is stricter than the skill itself, because the test runs on the
+host rather than in the sandbox.
 """
 
 #: Structured output schema — the response shape is guaranteed, so no parsing heuristics.
@@ -96,6 +103,7 @@ class ForgeRequest:
     apps: list[str]                      # every service the speaker has connected
     tools: list[dict]                    # introspected: definition + effect, per primitive
     args: dict = field(default_factory=dict)   # the keywords run() will actually receive
+    constraints: list[str] = field(default_factory=list)   # the admin's manifest ceilings
     feedback: str | None = None          # why the previous attempt failed
     previous_source: str | None = None
     attempt: int = 1
@@ -134,6 +142,11 @@ class ForgeRequest:
             lines.append(f"\n- {d['name']}  (effect: {tool.get('effect', 'unknown')})")
             lines.append(f"  {d['description']}")
             lines.append(f"  input_schema: {json.dumps(d['input_schema'])}")
+
+        # Stated before the model writes anything, not discovered by being rejected.
+        if self.constraints:
+            lines += ["", "This deployment's administrator also requires:"]
+            lines += [f"  - {c}" for c in self.constraints]
 
         if self.feedback:
             lines += [

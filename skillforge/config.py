@@ -86,11 +86,21 @@ class Capability:
         return not self.missing
 
 
+#: Name fragments that mean a value must never be echoed, however convenient it would be.
+#: Matched on the key name rather than the value, because a secret is identified by what
+#: it is for, not by what it looks like.
+SECRET_MARKERS = ("SECRET", "KEY", "TOKEN", "PASSWORD", "CREDENTIAL")
+
+
+def is_secret(key: str) -> bool:
+    return any(marker in key.upper() for marker in SECRET_MARKERS)
+
+
 CAPABILITIES = (
     Capability(
         name="Code generation",
-        unlocks="real generation instead of canned attempts "
-                "(scripts/forge_demo.py --live)",
+        unlocks="Claude writing skills for real instead of canned attempts "
+                "(scripts/consult_demo.py --live)",
         required=("ANTHROPIC_API_KEY",),
         optional=("SKILLFORGE_EFFORT",),
         fallback="ScriptedGenerator — canned attempts, including the failed first one",
@@ -102,28 +112,33 @@ CAPABILITIES = (
         unlocks="real per-user execution through Scalekit — the governance layer",
         required=("SCALEKIT_CLIENT_ID", "SCALEKIT_CLIENT_SECRET",
                   "SCALEKIT_ENVIRONMENT_URL"),
-        optional=("SKILLFORGE_LINEAR_CONNECTION_NAME",),
-        fallback="FakeScalekitActions — in-memory Linear with invented per-user grants",
-        notes=("The connection name is case-sensitive; a mismatch returns an empty "
-               "tool list with no error.",),
+        optional=("SKILLFORGE_CONNECTIONS",),
+        fallback="FakeClinicActions — in-memory HubSpot, Calendar and Gmail",
+        notes=("Connection names are case-sensitive; a mismatch returns an empty tool "
+               "list with no error.",
+               "A connected account can exist while carrying no token — check for "
+               "PENDING_AUTH with scripts/check_connection.py.",),
     ),
     Capability(
-        name="The two-mouths beat",
-        unlocks="the same sentence from two speakers producing opposite outcomes",
-        required=("SKILLFORGE_IDENTIFIER_FULL", "SKILLFORGE_IDENTIFIER_LIMITED"),
-        optional=("SKILLFORGE_IDENTIFIER_PEER",),
-        fallback="priya@co / sam@co in the fake adapter",
-        notes=("These two must have genuinely different Linear permissions. Two "
-               "accounts with the same grants make the beat silently meaningless.",),
+        name="Acting as the clinician",
+        unlocks="tool calls made under the doctor's own connected accounts",
+        required=("SKILLFORGE_IDENTIFIER_FULL",),
+        optional=("SKILLFORGE_IDENTIFIER_LIMITED", "SKILLFORGE_IDENTIFIER_PEER"),
+        fallback="the in-memory clinic in adapters/fake_clinic.py",
+        notes=("This must be the SAME string the connected accounts are filed under. "
+               "Signing in yields it from the verified token, so the two cannot drift "
+               "— but a token with no email claim falls back to an opaque sub, and "
+               "then nothing matches.",),
     ),
     Capability(
         name="Live call",
         unlocks="joining a call with streaming transcript and speaker labels",
         required=("MEETSTREAM_API_KEY",),
-        optional=("MEETSTREAM_BOT_NAME",),
+        optional=("MEETSTREAM_BOT_NAME", "MEETSTREAM_WEBHOOK_SECRET"),
         fallback="the scripted transcript in scripts/call.py",
-        notes=("Nothing is built against MeetStream yet — this key unlocks work that "
-               "does not exist, so it is the least urgent of these.",),
+        notes=("The transcript webhook needs a public URL; MeetStream cannot reach "
+               "127.0.0.1. Use `cloudflared tunnel --url http://127.0.0.1:8770`. "
+               "Without MEETSTREAM_WEBHOOK_SECRET the server rejects every event.",),
     ),
 )
 
@@ -133,7 +148,7 @@ def report() -> str:
     dim, bold, green, amber, grey, off = (
         "\033[2m", "\033[1m", "\033[32m", "\033[38;5;179m", "\033[38;5;244m", "\033[0m",
     )
-    out = [f"\n{bold}SkillForge configuration{off}",
+    out = [f"\n{bold}Cura configuration{off}",
            f"{dim}reading {ENV_PATH}{off}",
            f"{grey}values are never printed — only whether a key is set{off}\n"]
 
@@ -146,7 +161,16 @@ def report() -> str:
             out.append(f"      {key:<34} {state}")
         for key in cap.optional:
             value = get(key)
-            state = f"{grey}{value}{off}" if value else f"{grey}default{off}"
+            # Optional keys show their value because "SKILLFORGE_CONNECTIONS=gmail" is
+            # exactly what you need to see. Secrets are the exception and must be named
+            # rather than shown: this printed a live webhook secret in full, directly
+            # under a header promising it never would.
+            if not value:
+                state = f"{grey}default{off}"
+            elif is_secret(key):
+                state = f"{grey}set{off}"
+            else:
+                state = f"{grey}{value}{off}"
             out.append(f"      {key:<34} {state} {dim}(optional){off}")
         if not cap.ready:
             out.append(f"    {dim}falling back to:{off} {cap.fallback}")

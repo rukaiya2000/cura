@@ -18,6 +18,12 @@ TEMPLATE = ROOT / "skillforge" / "ui" / "consult.template.html"
 OUT = ROOT / "build" / "consult.html"
 TOKEN = "__CONSULTATION_JSON__"
 
+#: The sign-in screen needs no data inlined, but it is copied here rather than served
+#: from the source tree so `build/` stays the one directory the server exposes. A web
+#: root that reaches back into the repo is how a .py file ends up downloadable.
+SIGNIN_TEMPLATE = ROOT / "skillforge" / "ui" / "signin.template.html"
+SIGNIN_OUT = ROOT / "build" / "signin.html"
+
 
 def main() -> int:
     template = TEMPLATE.read_text()
@@ -30,8 +36,12 @@ def main() -> int:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(template.replace(TOKEN, payload))
 
+    SIGNIN_OUT.write_text(SIGNIN_TEMPLATE.read_text())
+
     data = consult.practice()
     print(f"wrote {OUT.relative_to(ROOT)}  ({OUT.stat().st_size / 1024:.1f} KB)")
+    print(f"wrote {SIGNIN_OUT.relative_to(ROOT)}  "
+          f"({SIGNIN_OUT.stat().st_size / 1024:.1f} KB)")
     print(f"  {len(data['patients'])} patients · {len(data['schedule'])} appointments · "
           f"{len(data['consultation'])} consultation events")
     return 0

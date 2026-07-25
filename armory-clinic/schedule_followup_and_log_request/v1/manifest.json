@@ -1,0 +1,24 @@
+{
+  "skill": "schedule_followup_and_log_request",
+  "apps": [
+    "calendar",
+    "hubspot"
+  ],
+  "primitives_used": [
+    "hubspot.get_contact",
+    "calendar.list_events",
+    "calendar.create_event",
+    "hubspot.create_note",
+    "hubspot.create_task"
+  ],
+  "effects": "write",
+  "version": 1,
+  "reversible": true,
+  "inverse": "cancel_followup",
+  "forged_by": "priya.rao@clinic.test",
+  "trust": "tempered",
+  "description": "Book a follow-up appointment and log the outstanding blood test.",
+  "stats": {
+    "forged_at": "2026-07-25T19:31:13Z"
+  }
+}

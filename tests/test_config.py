@@ -6,6 +6,8 @@ credential, or a checked-in file overriding what CI exported.
 
 import os
 
+import pytest
+
 from skillforge.config import CAPABILITIES, get, load_env
 
 
@@ -91,15 +93,26 @@ def test_every_capability_names_a_fallback():
 
 
 def test_the_env_example_documents_every_key_the_capabilities_reference():
-    """A key the report checks but the template never mentions is unfillable."""
+    """A key the report checks but the template never mentions is unfillable.
+
+    Compares *key names only*. An earlier version asserted `key in text` against the
+    whole file, and pytest renders the compared value on failure — so one drifted key
+    printed the developer's real `.env`, secrets and all, into the test output. Reducing
+    both files to their key names first means a failure here can only ever show names.
+    """
     from skillforge.config import ROOT
 
-    template = (ROOT / ".env.example").read_text()
-    blank = (ROOT / ".env").read_text()
+    def key_names(path):
+        return {line.split("=", 1)[0].strip()
+                for line in path.read_text().splitlines()
+                if "=" in line and not line.lstrip().startswith("#")}
+
+    template = key_names(ROOT / ".env.example")
+    blank = key_names(ROOT / ".env")
     for cap in CAPABILITIES:
         for key in cap.required + cap.optional:
-            assert f"{key}=" in template, f"{key} missing from .env.example"
-            assert f"{key}=" in blank, f"{key} missing from .env"
+            assert key in template, f"{key} missing from .env.example"
+            assert key in blank, f"{key} missing from .env"
 
 
 def test_the_env_file_is_gitignored():
@@ -109,3 +122,46 @@ def test_the_env_file_is_gitignored():
     ignored = (ROOT / ".gitignore").read_text().splitlines()
     assert ".env" in ignored
     assert "!.env.example" in ignored, "the template must stay committable"
+
+
+# --- the report must keep its own promise -----------------------------------
+
+
+def test_the_report_never_prints_a_secret_value(monkeypatch):
+    """It prints "values are never printed" at the top and then printed a live webhook
+    secret in full, because optional keys showed their value and one of them was a
+    secret. The header was true of required keys and false of optional ones."""
+    from skillforge.config import report
+
+    planted = {
+        "MEETSTREAM_WEBHOOK_SECRET": "sk-live-DO-NOT-PRINT-4a3e4a6b",
+        "ANTHROPIC_API_KEY": "sk-ant-DO-NOT-PRINT-9912",
+        "SCALEKIT_CLIENT_SECRET": "scs-DO-NOT-PRINT-7719",
+    }
+    for key, value in planted.items():
+        monkeypatch.setenv(key, value)
+
+    text = report()
+    for key, value in planted.items():
+        assert value not in text, f"{key} was printed in full"
+        assert key in text, f"{key} should still be listed as set"
+
+
+def test_a_non_secret_optional_value_is_still_shown():
+    """Masking everything would be safe and useless — SKILLFORGE_CONNECTIONS=gmail is
+    exactly the value you open this report to check."""
+    from skillforge.config import is_secret
+
+    assert not is_secret("SKILLFORGE_CONNECTIONS")
+    assert not is_secret("MEETSTREAM_BOT_NAME")
+    assert not is_secret("SKILLFORGE_IDENTIFIER_FULL")
+
+
+@pytest.mark.parametrize("key", [
+    "MEETSTREAM_WEBHOOK_SECRET", "ANTHROPIC_API_KEY", "SCALEKIT_CLIENT_SECRET",
+    "SOME_ACCESS_TOKEN", "DB_PASSWORD", "GCP_CREDENTIAL",
+])
+def test_anything_named_like_a_secret_is_treated_as_one(key):
+    from skillforge.config import is_secret
+
+    assert is_secret(key)

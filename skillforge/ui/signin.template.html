@@ -1,0 +1,279 @@
+<title>Cura — consultation assistant</title>
+
+<style>
+  /* Same tokens as the app, light-only for the same reason: clinical software is read in
+     one register on every machine in the practice.
+
+     This page has two jobs and the layout says which is which — the explanation takes the
+     wide column because most people arriving have never seen this, and the sign-in card
+     sits beside it rather than above, so neither buries the other. Below 900px the card
+     goes first: someone who already has an account should not scroll past a pitch they
+     have read before. */
+  :root {
+    color-scheme: light;
+    --ground: #f2f6fb;
+    --panel: #ffffff;
+    --panel-2: #f7fafd;
+    --rule: #dce6f2;
+    --rule-strong: #c2d3e8;
+    --ink: #10243d;
+    --ink-2: #40587a;
+    --ink-3: #5e7195;
+    --accent: #1b5fa8;
+    --accent-soft: rgba(27, 95, 168, 0.08);
+    --attention: #96600b;
+    --refused: #a32a2a;
+    --refused-soft: rgba(163, 42, 42, 0.06);
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --note: ui-serif, Charter, Georgia, "Iowan Old Style", serif;
+
+    --step--1: 0.78rem;
+    --step-0: 0.9rem;
+    --step-1: 1.05rem;
+    --step-2: 1.3rem;
+    --step-3: 1.75rem;
+    --step-4: 2.35rem;
+    --radius: 6px;
+    --shadow: 0 1px 2px rgba(16, 36, 61, 0.05), 0 8px 24px -18px rgba(16, 36, 61, 0.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    background: var(--ground); color: var(--ink);
+    font: var(--step-0)/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { margin: 0; font-weight: 600; text-wrap: balance; }
+  p { margin: 0; }
+
+  .page {
+    max-width: 62rem; margin: 0 auto;
+    padding: clamp(1.5rem, 5vw, 3.5rem) clamp(1rem, 4vw, 2rem);
+  }
+
+  .brand {
+    display: flex; align-items: center; gap: 0.7rem;
+    margin-bottom: clamp(2rem, 6vw, 3.5rem);
+  }
+  .brand .mark {
+    display: grid; place-items: center; width: 2.1rem; height: 2.1rem;
+    border-radius: var(--radius); background: var(--accent); color: #fff;
+    font: 700 var(--step-1) var(--sans);
+  }
+  .brand b { display: block; font-size: var(--step-1); }
+  .brand span { color: var(--ink-3); font-size: var(--step--1); }
+
+  .split {
+    display: grid; gap: clamp(2rem, 5vw, 3.5rem);
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 21rem);
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    /* Card first on narrow screens — a returning doctor should not scroll past the pitch. */
+    .split { grid-template-columns: minmax(0, 1fr); gap: 2.2rem; }
+    .pitch { order: 2; }
+    .door { order: 1; }
+  }
+
+  /* --- the explanation ----------------------------------------------- */
+
+  .eyebrow {
+    font: 600 var(--step--1) var(--sans);
+    letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent);
+    margin-bottom: 0.7rem;
+  }
+  h1 {
+    font-size: var(--step-4); letter-spacing: -0.02em; line-height: 1.15;
+    margin-bottom: 0.8rem;
+  }
+  .lede {
+    font-size: var(--step-1); color: var(--ink-2); max-width: 34ch;
+    margin-bottom: clamp(1.8rem, 4vw, 2.6rem);
+  }
+
+  .points { display: grid; gap: 1.4rem; }
+  .point { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.2rem 0.85rem; }
+  /* A rule rather than an icon or a number: these are four independent guarantees, not a
+     sequence, and numbering them would claim an order the product does not have. */
+  .point::before {
+    content: ""; grid-row: 1 / span 2;
+    width: 2px; border-radius: 1px; background: var(--rule-strong);
+  }
+  .point[data-tone="refuse"]::before { background: var(--refused); }
+  .point[data-tone="hold"]::before { background: var(--attention); }
+  .point[data-tone="trace"]::before { background: var(--accent); }
+  .point h3 { font-size: var(--step-0); }
+  .point p { color: var(--ink-2); max-width: 46ch; }
+  .point .said {
+    display: block; margin-top: 0.35rem;
+    font: var(--step--1) var(--note); color: var(--ink-3); font-style: italic;
+  }
+
+  /* --- the door ------------------------------------------------------- */
+
+  .card {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.4rem;
+  }
+  .card h2 { font-size: var(--step-2); margin-bottom: 0.3rem; }
+  .card .sub { color: var(--ink-2); font-size: var(--step--1); margin-bottom: 1.2rem; }
+
+  .btn {
+    display: block; width: 100%; padding: 0.7rem 1rem; margin-bottom: 0.6rem;
+    border-radius: var(--radius); border: 1px solid var(--accent);
+    background: var(--accent); color: #fff;
+    font: 600 var(--step-0) var(--sans); text-align: center; text-decoration: none;
+    cursor: pointer;
+  }
+  .btn.ghost { background: transparent; color: var(--accent); }
+  .btn:hover { filter: brightness(1.06); }
+  .btn.ghost:hover { background: var(--accent-soft); filter: none; }
+  :is(.btn, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .sep {
+    display: flex; align-items: center; gap: 0.7rem;
+    margin: 0.9rem 0; color: var(--ink-3); font-size: var(--step--1);
+  }
+  .sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+
+  .why {
+    margin-top: 1.1rem; padding-top: 0.9rem; border-top: 1px solid var(--rule);
+    color: var(--ink-3); font-size: var(--step--1); line-height: 1.55;
+  }
+  .why b { color: var(--ink-2); }
+
+  .banner {
+    padding: 0.7rem 0.85rem; margin-bottom: 1.1rem;
+    border-radius: var(--radius); font-size: var(--step--1); line-height: 1.5;
+  }
+  .banner[data-kind="error"] {
+    background: var(--refused-soft); border: 1px solid var(--refused);
+  }
+  .banner[data-kind="setup"] {
+    background: rgba(150, 96, 11, 0.06); border: 1px solid var(--attention);
+  }
+  .banner b { display: block; margin-bottom: 0.2rem; }
+  .banner[hidden] { display: none; }
+
+  .foot {
+    margin-top: clamp(2.5rem, 6vw, 4rem); padding-top: 1.1rem;
+    border-top: 1px solid var(--rule);
+    color: var(--ink-3); font-size: var(--step--1);
+  }
+</style>
+
+<div class="page">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">C</span>
+    <div>
+      <b>Cura</b>
+      <span>Consultation assistant</span>
+    </div>
+  </div>
+
+  <div class="split">
+    <main class="pitch">
+      <p class="eyebrow">For clinicians</p>
+      <h1>The consultation writes itself. You decide what leaves the room.</h1>
+      <p class="lede">Cura joins your appointments, keeps the note, drafts the patient's
+        letter and books what comes next — through your own calendar and records, never
+        its own.</p>
+
+      <div class="points">
+        <div class="point">
+          <h3>It knows who it is with</h3>
+          <p>The patient comes from the invite you sent, fixed before the meeting exists.
+            Never guessed from a voice on the call.</p>
+        </div>
+
+        <div class="point" data-tone="trace">
+          <h3>Every line traces back</h3>
+          <p>Each sentence in the letter links to the moment it came from, so checking it
+            is a matter of seconds. Anything Cura cannot trace is flagged before you
+            send.</p>
+          <span class="said">“The morning readings are higher — around 9 or 10 before
+            breakfast.”</span>
+        </div>
+
+        <div class="point" data-tone="hold">
+          <h3>Nothing reaches a patient unread</h3>
+          <p>Cura drafts. You edit and approve. Only then does it send — and there is
+            still a window to stop it.</p>
+        </div>
+
+        <div class="point" data-tone="refuse">
+          <h3>It stays with one patient</h3>
+          <p>Ask it to update a different record mid-consultation and it refuses, even
+            though you have permission to. This consultation is about someone else.</p>
+        </div>
+      </div>
+    </main>
+
+    <div class="door">
+      <div class="card">
+        <div class="banner" id="banner" data-kind="error" hidden></div>
+
+        <h2>Sign in</h2>
+        <p class="sub">Your patient list, today's clinic, and anything waiting for your
+          approval.</p>
+
+        <a class="btn" id="signin" href="/auth/login">Sign in</a>
+        <div class="sep">new here</div>
+        <a class="btn ghost" id="signup" href="/auth/signup">Create an account</a>
+
+        <!-- Not a footnote. Someone signing in should know why this asks for the account
+             that already holds their calendar and CRM, rather than a new password. -->
+        <p class="why">
+          You sign in with the account that already holds your <b>calendar and patient
+          records</b>. That is deliberate: Cura acts as you, through your own permissions,
+          so there is no second identity to keep in step with the first.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <p class="foot">Synthetic patient data throughout. Nothing here is a real record.</p>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // State arrives in the query string rather than being templated in, so this page stays
+  // an ordinary static file the server can hand over without rewriting it per request.
+  const params = new URLSearchParams(location.search);
+  const banner = document.getElementById("banner");
+
+  const show = (kind, title, detail) => {
+    banner.dataset.kind = kind;
+    banner.textContent = "";
+    const b = document.createElement("b");
+    b.textContent = title;
+    banner.append(b, document.createTextNode(detail));
+    banner.hidden = false;
+  };
+
+  if (params.get("unconfigured")) {
+    // The one failure a doctor cannot fix by trying again, so say what to do rather than
+    // offering a button that will only fail the same way.
+    show("setup", "Sign-in is not configured yet",
+         "This deployment has no Scalekit credentials. Set SCALEKIT_ENVIRONMENT_URL, " +
+         "SCALEKIT_CLIENT_ID and SCALEKIT_CLIENT_SECRET in .env, then restart the server.");
+    for (const id of ["signin", "signup"]) {
+      const el = document.getElementById(id);
+      el.setAttribute("aria-disabled", "true");
+      el.style.opacity = "0.45";
+      el.style.pointerEvents = "none";
+    }
+  } else if (params.get("error")) {
+    // The provider's own words. A generic "something went wrong" is the difference
+    // between a fixable problem and a support ticket.
+    show("error", "Sign-in did not complete", params.get("error").slice(0, 300));
+  } else if (params.get("signedout")) {
+    show("setup", "You are signed out", "Your session on this device has been ended.");
+  }
+})();
+</script>

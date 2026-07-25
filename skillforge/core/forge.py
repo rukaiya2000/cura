@@ -248,6 +248,7 @@ class Forge:
             request = ForgeRequest(
                 intent=intent, speaker=speaker, apps=connected, tools=tools,
                 args=kwargs,          # so the signature it writes matches the call site
+                constraints=self.policy.constraints(),   # ceilings stated, not discovered
                 feedback=feedback, previous_source=previous_source, attempt=n,
             )
             self._emit(FORGE_STAGE, forge_id=forge_id, skill=None, stage="hammering")

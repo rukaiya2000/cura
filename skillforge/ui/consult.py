@@ -210,7 +210,7 @@ def demo_consultation() -> list[dict]:
       note="identity established at scheduling time, not inferred from the call")
     e(0.4, ACCESSED, target=patient["crm_id"], what="HubSpot contact", effect="read")
     e(0.9, CONTEXT_FETCHED, context=CONTEXT)
-    e(1.2, BOT_JOINED, bot="Forge", meeting="Google Meet · abc-defg-hij")
+    e(1.2, BOT_JOINED, bot="Cura", meeting="Google Meet · abc-defg-hij")
 
     e(2.0, SAID, id="u1", who="clinician", name="Dr Rao",
       text="Morning Amara — how have things been since June?")
@@ -232,7 +232,7 @@ def demo_consultation() -> list[dict]:
            "readings and to rise slowly from sitting.")
 
     e(34.0, SAID, id="u5", who="clinician", name="Dr Rao",
-      text="Right — bloods done and I'll see you in six weeks. Forge, book her a "
+      text="Right — bloods done and I'll see you in six weeks. Cura, book her a "
            "follow-up in six weeks and log the HbA1c request.")
     e(36.5, ACTION_PROPOSED, action="schedule_followup_and_log_request",
       summary="Follow-up booked and the outstanding blood test logged",
@@ -270,7 +270,7 @@ def demo_consultation() -> list[dict]:
               "symptoms at follow-up.",
       written=3, refused=1, reads=1, duration_label="14 min")
 
-    e(62.0, DRAFT_READY, drafted_by="Forge · claude-opus-5", hold_seconds=20,
+    e(62.0, DRAFT_READY, drafted_by="Cura · claude-opus-5", hold_seconds=20,
       recipient={
           "name": patient["name"], "email": patient["email"],
           "verified_against": patient["crm_id"],

@@ -31,11 +31,12 @@ class FakeAuth:
         self.states: list[str] = []
         self.seen: dict = {}
 
-    def login_url(self):
+    def login_url(self, *, signup=False):
         if not self.configured:
             raise AuthError("missing credentials: SCALEKIT_CLIENT_ID")
         state = f"state-{len(self.states)}"
         self.states.append(state)
+        self.seen["signup"] = signup
         return f"https://auth.example/authorize?state={state}", state
 
     def callback(self, *, code, state):
@@ -57,6 +58,7 @@ def site(tmp_path):
     root = tmp_path / "build"
     root.mkdir()
     (root / "consult.html").write_text("<h1>Consultation</h1>")
+    (root / "signin.html").write_text("<h1>Sign in</h1><a href='/auth/signup'>Create</a>")
     (root / "events.json").write_text('{"ok": true}')
     (tmp_path / "secret.txt").write_text("must never be served")
 
@@ -120,7 +122,7 @@ def test_an_unauthenticated_request_is_sent_to_login(site):
     r = fetch(made, "/")
 
     assert r.status == 302
-    assert r.headers["Location"] == "/auth/login"
+    assert r.headers["Location"] == "/signin"
 
 
 def test_the_page_itself_is_not_reachable_unauthenticated(site):
@@ -156,14 +158,14 @@ def test_login_redirects_to_the_provider(site):
 
 
 def test_login_says_so_plainly_when_unconfigured(site):
-    """A 503 naming the missing variables beats a stack trace or a blank redirect."""
+    """Missing credentials are a deployment problem, not the doctor's. They land on the
+    sign-in page, which explains it and disables the buttons — not a bare 503 that can
+    only be reloaded."""
     made = site(auth=FakeAuth(configured=False))
     r = fetch(made, "/auth/login")
 
-    assert r.status == 503
-    body = r.read().decode()
-    assert "SCALEKIT_CLIENT_ID" in body
-    assert ".env" in body
+    assert r.status == 302
+    assert r.headers["Location"] == "/signin?unconfigured=1"
 
 
 def test_an_unconfigured_server_still_refuses_entry(site):
@@ -218,7 +220,8 @@ def test_a_bad_state_is_rejected_with_no_session_created(site):
     fetch(made, "/auth/login")
     r = fetch(made, "/auth/callback?code=abc&state=forged")
 
-    assert r.status == 400
+    assert r.status == 302
+    assert "/signin?error=" in r.headers["Location"]
     assert len(made["store"]) == 0
     assert COOKIE not in cookie_header(r)
 
@@ -227,8 +230,8 @@ def test_a_declined_sign_in_reports_the_providers_reason(site):
     made = site()
     r = fetch(made, "/auth/callback?error=access_denied")
 
-    assert r.status == 400
-    assert "access_denied" in r.read().decode()
+    assert r.status == 302
+    assert "access_denied" in r.headers["Location"]
     assert len(made["store"]) == 0
 
 
@@ -237,7 +240,8 @@ def test_a_failed_exchange_does_not_create_a_session(site):
     fetch(made, "/auth/login")
     r = fetch(made, f"/auth/callback?code=abc&state={made['auth'].states[-1]}")
 
-    assert r.status == 400
+    assert r.status == 302
+    assert "/signin?error=" in r.headers["Location"]
     assert len(made["store"]) == 0
 
 
@@ -322,7 +326,7 @@ def test_logout_still_works_when_the_provider_call_fails(site):
     r = fetch(made, "/auth/logout")
 
     assert r.status == 302
-    assert r.headers["Location"] == "/"
+    assert r.headers["Location"] == "/signin?signedout=1"
     assert len(made["store"]) == 0
 
 
@@ -391,3 +395,276 @@ def test_dropping_an_unknown_id_is_harmless():
     store.drop("nothing")
     store.drop(None)
     assert len(store) == 0
+
+
+# --- sign in, sign up, sign out as a doctor experiences them -----------------
+
+
+def test_the_sign_in_screen_is_reachable_signed_out(site):
+    """The one page reachable without a session. Served rather than bounced straight to
+    the provider — an instant redirect to an unfamiliar domain is how a login looks
+    broken."""
+    made = site()
+    r = fetch(made, "/signin")
+
+    assert r.status == 200
+    assert b"Sign in" in r.read()
+
+
+def test_the_gate_lands_on_the_sign_in_screen(site):
+    made = site()
+    assert fetch(made, "/consult.html").headers["Location"] == "/signin"
+
+
+def test_sign_up_asks_the_provider_for_the_create_account_screen(site):
+    """`prompt=create` is a hint about which screen to show, not a separate flow."""
+    made = site()
+    r = fetch(made, "/auth/signup")
+
+    assert r.status == 302
+    assert r.headers["Location"].startswith("https://auth.example/authorize")
+    assert made["auth"].seen["signup"] is True
+
+
+def test_sign_in_does_not_ask_for_the_create_account_screen(site):
+    made = site()
+    fetch(made, "/auth/login")
+    assert made["auth"].seen["signup"] is False
+
+
+def test_a_new_account_comes_back_through_the_same_callback(site):
+    """Sign-up and sign-in must converge. If they had separate callbacks the two would
+    drift, and the one used less often would be the one that broke."""
+    made = site()
+    fetch(made, "/auth/signup")
+    r = fetch(made, f"/auth/callback?code=abc&state={made['auth'].states[-1]}")
+
+    assert r.status == 302
+    assert r.headers["Location"] == "/"
+    assert len(made["store"]) == 1
+
+
+def test_signing_out_says_so_rather_than_looping(site):
+    """Landing back on `/` after logout would immediately redirect to sign-in, which
+    reads as the sign-out having failed."""
+    made = site(auth=type("NoProvider", (FakeAuth,), {
+        "logout_url": lambda self, s, **k: (_ for _ in ()).throw(RuntimeError("none"))})())
+    sign_in(made)
+    r = fetch(made, "/auth/logout")
+
+    assert r.headers["Location"] == "/signin?signedout=1"
+
+
+def test_the_page_is_reachable_again_after_signing_back_in(site):
+    """The whole round trip, because each half passing separately has proven nothing
+    about the pair."""
+    made = site()
+    sign_in(made)
+    assert fetch(made, "/", follow=True).status == 200
+
+    fetch(made, "/auth/logout")
+    assert fetch(made, "/").status == 302, "still signed in after signing out"
+
+    sign_in(made)
+    assert b"Consultation" in fetch(made, "/", follow=True).read()
+
+
+def test_a_dropped_session_cannot_be_revived_by_the_old_cookie(site):
+    """The reason the cookie holds an opaque id: signing out must make the cookie
+    worthless, not merely ask the browser to forget it."""
+    made = site()
+    sign_in(made)
+    stolen = next(iter(made["store"]._rows))
+    fetch(made, "/auth/logout")
+
+    request = urllib.request.Request(made["base"] + "/me",
+                                     headers={"Cookie": f"{COOKIE}={stolen}"})
+    try:
+        urllib.request.urlopen(request)
+        assert False, "a logged-out session id still works"
+    except urllib.error.HTTPError as e:
+        assert e.status == 401
+
+
+# --- the meeting webhook -----------------------------------------------------
+
+import hashlib
+import hmac
+
+from skillforge.adapters.meetstream import Binding
+from skillforge.ui.serve import LiveConsultations
+
+HOOK_BINDING = Binding(consultation_id="con-0912", patient_id="PT-10482",
+                       patient_name="Amara Okafor",
+                       clinician="priya.rao@clinic.test",
+                       clinician_name="Dr Priya Rao", crm_id="hs-contact-88412")
+SECRET = "hook-s3cret"
+
+
+def hooked(made, path, payload, *, secret=SECRET, sign=True):
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if sign:
+        headers["X-MeetStream-Signature"] = "sha256=" + hmac.new(
+            secret.encode(), body, hashlib.sha256).hexdigest()
+    request = urllib.request.Request(made["base"] + path, data=body,
+                                     headers=headers, method="POST")
+    try:
+        return urllib.request.urlopen(request)
+    except urllib.error.HTTPError as e:
+        return e
+
+
+def turn(text, speaker="Amara Okafor", final=True, binding=HOOK_BINDING):
+    return {"bot_id": "bot-1", "speakerName": speaker,
+            "timestamp": "2026-07-25T09:20:30.354452",
+            "transcript": text, "new_text": text, "utterance": "",
+            "end_of_turn": final, "transcription_mode": "word_level",
+            "custom_attributes": binding.to_attributes() if binding else {}}
+
+
+@pytest.fixture
+def hooks(site):
+    live = LiveConsultations()
+    made = site(consultations=live, hook_secret=SECRET)
+    made["live"] = live
+    return made
+
+
+def test_a_signed_transcript_turn_is_accepted(hooks):
+    r = hooked(hooks, "/hooks/transcript", turn("The morning readings are higher."))
+
+    assert r.status == 200
+    assert json.loads(r.read())["kept"] is True
+    room = hooks["live"].get("con-0912")
+    assert room["said"][0]["text"] == "The morning readings are higher."
+    assert room["patient_id"] == "PT-10482"
+
+
+def test_an_unsigned_webhook_is_refused(hooks):
+    """This endpoint is outside the session gate by necessity — MeetStream has no cookie.
+    An open endpoint here does not leak data, it *injects* it, into a patient record."""
+    r = hooked(hooks, "/hooks/transcript", turn("Injected."), sign=False)
+
+    assert r.status == 401
+    assert hooks["live"].rooms == {}
+
+
+def test_a_wrongly_signed_webhook_is_refused(hooks):
+    r = hooked(hooks, "/hooks/transcript", turn("Injected."), secret="wrong-secret")
+
+    assert r.status == 401
+    assert hooks["live"].rooms == {}
+
+
+def test_an_unconfigured_secret_refuses_everything(site):
+    """Failing open when unconfigured would be silent, and it is the worst direction."""
+    live = LiveConsultations()
+    made = site(consultations=live, hook_secret="")
+    assert hooked(made, "/hooks/transcript", turn("x")).status == 401
+    assert live.rooms == {}
+
+
+def test_interim_words_are_accepted_but_not_kept(hooks):
+    """MeetStream does not retry non-2xx, so an interim event must still get a 2xx —
+    it is simply not part of the transcript."""
+    r = hooked(hooks, "/hooks/transcript", turn("The morn", final=False))
+
+    assert r.status == 200
+    assert json.loads(r.read())["kept"] is False
+    assert hooks["live"].rooms == {}
+
+
+def test_a_turn_with_no_binding_is_dropped(hooks):
+    """Nothing guesses which consultation an unbound line belongs to."""
+    r = hooked(hooks, "/hooks/transcript", turn("Whose is this?", binding=None))
+
+    assert r.status == 200
+    assert hooks["live"].rooms == {}
+
+
+def test_lifecycle_events_move_the_consultation_status(hooks):
+    base = {"bot_id": "bot-1", "timestamp": "2026-07-25T09:20:04",
+            "status_code": 200, "message": "",
+            "custom_attributes": HOOK_BINDING.to_attributes()}
+
+    hooked(hooks, "/hooks/bot", {**base, "bot_event": "bot.inmeeting"})
+    assert hooks["live"].get("con-0912")["status"] == "live"
+
+    hooked(hooks, "/hooks/bot", {**base, "bot_event": "bot.stopped"})
+    assert hooks["live"].get("con-0912")["status"] == "ended"
+
+
+def test_a_refused_bot_is_distinguished_from_a_finished_one(hooks):
+    """"The consultation ended" and "the host never let us in" need different words."""
+    hooked(hooks, "/hooks/bot", {
+        "bot_event": "bot.denied", "bot_id": "bot-1", "status_code": 500,
+        "message": "Host rejected the join request",
+        "timestamp": "2026-07-25T09:20:04",
+        "custom_attributes": HOOK_BINDING.to_attributes()})
+
+    room = hooks["live"].get("con-0912")
+    assert room["status"] == "ended"
+    assert "rejected" in room["refused_reason"]
+
+
+def test_an_oversized_body_is_refused_without_reading_it(hooks):
+    """A transcript turn is a sentence. Reading an unbounded Content-Length from an
+    unauthenticated caller is how a public endpoint becomes a memory-exhaustion bug.
+
+    Refusing *without reading* means the server may close before the client finishes
+    sending, so a connection-level error is a pass here too — the point is that the body
+    was never consumed, not which layer noticed."""
+    body = b"x" * (300 * 1024)
+    request = urllib.request.Request(
+        hooks["base"] + "/hooks/transcript", data=body, method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(request)
+        assert False, "a 300KB 'transcript turn' was accepted"
+    except urllib.error.HTTPError as e:
+        assert e.status == 413
+    except (urllib.error.URLError, ConnectionError, BrokenPipeError):
+        pass                            # refused mid-upload, which is the intent
+    assert hooks["live"].rooms == {}, "an oversized body still reached the store"
+
+
+def test_an_unknown_post_route_is_404(hooks):
+    assert hooked(hooks, "/hooks/nope", {}).status == 404
+
+
+# --- reading the transcript back --------------------------------------------
+
+
+def test_live_transcript_is_behind_the_gate(hooks):
+    hooked(hooks, "/hooks/transcript", turn("Private."))
+    r = fetch(hooks, "/live")
+
+    assert r.status == 401
+    assert b"Private" not in r.read()
+
+
+def test_a_signed_in_clinician_sees_their_own_consultation(hooks):
+    hooked(hooks, "/hooks/transcript", turn("The morning readings are higher."))
+    sign_in(hooks)
+    r = fetch(hooks, "/live", follow=True)
+
+    rooms = json.loads(r.read())["consultations"]
+    assert len(rooms) == 1
+    assert rooms[0]["said"][0]["text"] == "The morning readings are higher."
+
+
+def test_another_clinicians_consultation_is_not_visible(hooks):
+    """The binding names whose bot it is. Without this filter one doctor's live
+    transcript appears on another's screen."""
+    other = Binding(consultation_id="con-9999", patient_id="PT-77777",
+                    patient_name="Someone Else", clinician="james@clinic.test",
+                    clinician_name="Dr James Whitfield")
+    hooked(hooks, "/hooks/transcript", turn("Not yours.", binding=other))
+    hooked(hooks, "/hooks/transcript", turn("Yours."))
+
+    sign_in(hooks)                      # signs in as priya.rao@clinic.test
+    rooms = json.loads(fetch(hooks, "/live", follow=True).read())["consultations"]
+
+    assert [r["consultation_id"] for r in rooms] == ["con-0912"]
+    assert "Not yours." not in json.dumps(rooms)

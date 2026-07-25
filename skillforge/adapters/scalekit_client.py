@@ -139,8 +139,11 @@ class ScalekitActions:
         )
         return cls(
             actions=client.actions,
-            connection=connection or os.environ.get(
-                "SKILLFORGE_LINEAR_CONNECTION_NAME", "linear"),
+            # `SKILLFORGE_CONNECTIONS` is a comma-separated list because a clinical
+            # skill spans services — the first is the default for a single-connection
+            # client. The old `SKILLFORGE_LINEAR_CONNECTION_NAME` is still read so an
+            # existing .env keeps working rather than silently listing no tools.
+            connection=connection or _default_connection(),
         )
 
     # --- introspection -----------------------------------------------------
@@ -165,10 +168,21 @@ class ScalekitActions:
                 ) from e
             raise
 
+        # The live API returns `(ListScopedToolsResponse, call)`, and the response is a
+        # protobuf message rather than a sequence — iterating it directly raises. Its
+        # `.tools` are `ScopedTool` wrappers, so the definition sits one level deeper
+        # than the shape this originally assumed. Verified against a real connected
+        # account returning 37 Gmail primitives; a fake cannot catch this.
         raw = response[0] if isinstance(response, tuple) else response
+        entries = _attr(raw, "tools")
+        if entries is None:
+            entries = raw if isinstance(raw, (list, tuple)) else []
+
         tools = []
-        for entry in raw or []:
+        for entry in entries:
+            entry = _attr(entry, "tool") or entry          # unwrap ScopedTool
             definition = _attr(entry, "definition") or entry
+            definition = _plain(definition)
             wire_name = _attr(definition, "name")
             if not wire_name:
                 continue
@@ -249,10 +263,46 @@ class ScalekitScopedClient:
         )
 
 
+def _default_connection() -> str:
+    """First name in SKILLFORGE_CONNECTIONS, or the pre-pivot single-connection key."""
+    listed = [n.strip() for n in os.environ.get("SKILLFORGE_CONNECTIONS", "").split(",")
+              if n.strip()]
+    if listed:
+        return listed[0]
+    return os.environ.get("SKILLFORGE_LINEAR_CONNECTION_NAME") or "gmail"
+
+
+def connection_names() -> list[str]:
+    """Every connection this deployment expects, for callers that span services."""
+    listed = [n.strip() for n in os.environ.get("SKILLFORGE_CONNECTIONS", "").split(",")
+              if n.strip()]
+    return listed or [_default_connection()]
+
+
 def _attr(obj, name):
-    """Read a field whether the SDK hands back objects or dicts."""
+    """Read a field whether the SDK hands back objects, protobufs or dicts."""
     if obj is None:
         return None
     if isinstance(obj, dict):
         return obj.get(name)
-    return getattr(obj, name, None)
+    value = getattr(obj, name, None)
+    # A protobuf repeated field is falsy when empty but is still the right answer; only
+    # a genuinely absent attribute should read as None.
+    return value if value is not None or hasattr(obj, name) else None
+
+
+def _plain(value):
+    """A protobuf Struct as an ordinary dict, left alone if it is already one.
+
+    The live tool definition arrives as a `google.protobuf.Struct`, where `.name` is a
+    *map key* rather than an attribute — `getattr(definition, "name")` raises rather than
+    returning the tool's name, which is how a listing of 37 real tools produced zero.
+    """
+    if isinstance(value, (dict, type(None))):
+        return value
+    try:
+        from google.protobuf.json_format import MessageToDict
+
+        return MessageToDict(value, preserving_proto_field_name=True)
+    except Exception:  # noqa: BLE001 — not a protobuf; use it as it came
+        return value

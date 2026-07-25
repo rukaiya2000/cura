@@ -50,12 +50,16 @@ RULES: tuple[tuple[str, str], ...] = (
 
 #: Questions answered from the patient's own record. Each maps to a field and a way of
 #: saying it. Retrieval only — nothing here computes, compares or advises.
+#: Prefixes end in `\w*`, not `\b`. `\ballerg\b` cannot match "allergies" — the word
+#: carries on — so the rule silently never fired, and the bot answered nothing while
+#: looking like it had no opinion.
 RECORD_RULES: tuple[tuple[str, str], ...] = (
-    (r"\b(medication|medicine|meds|drugs|prescri|taking)\b", "medications"),
-    (r"\b(allerg|react)\b", "allergies"),
-    (r"\b(condition|history|diagnos|problem|past)\b", "conditions"),
-    (r"\b(last (seen|visit|appointment)|when did|previous)\b", "last_seen"),
-    (r"\b(who is|which patient|whose|remind me who|patient)\b", "who"),
+    (r"\b(medication\w*|medicine\w*|meds|drugs?|prescri\w*|taking|on right now)\b",
+     "medications"),
+    (r"\ballerg\w*|\breact\w*", "allergies"),
+    (r"\b(condition\w*|histor\w*|diagnos\w*|problem\w*|past)\b", "conditions"),
+    (r"\b(last (seen|visit\w*|appointment)|when did|previous\w*)\b", "last_seen"),
+    (r"\b(who is|who am i|which patient|whose|remind me who|patient)\b", "who"),
 )
 
 #: Asked of the bot, these are requests for judgement rather than for the record. Matched
@@ -114,6 +118,26 @@ def record_reply(text: str, patient: dict | None) -> str | None:
             return f"Nothing is recorded for {name} under {field}."
         return f"{name} is {label} {listed}, according to the record."
     return None
+
+
+#: The doctor explicitly asking for the record to change. Nothing else does — a patient
+#: mentioning a new symptom is captured in the transcript and drafted into the note, but
+#: it does not touch the record until somebody says so. A record that edits itself from
+#: overheard conversation is one no clinician would trust twice.
+UPDATE_ASKED = (
+    r"\b(update|add (that |this |it )?to|put (that|this|it) (on|in)|"
+    r"record (that|this|it)|note (that|this|it) (down|on)|change (her|his|their|the) "
+    r"(record|notes?|details))\b")
+
+
+def update_requested(text: str) -> bool:
+    """Did the clinician ask for the record itself to be changed?
+
+    Requires the bot to be addressed *and* an explicit instruction. "She's on 10mg now"
+    said to the patient is a fact for the note; "Cura, update her record — she's on 10mg
+    now" is an instruction. The difference is the whole reason this function exists.
+    """
+    return bool(addressed(text) and re.search(UPDATE_ASKED, text or "", re.IGNORECASE))
 
 
 def addressed(text: str) -> bool:

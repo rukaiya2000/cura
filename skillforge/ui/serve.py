@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from ..adapters.auth import Auth, AuthError, Session
 from ..core.drafting import ClaudeDrafter, DraftError
-from ..core.wake import reply_to
+from ..core.wake import record_reply, reply_to
 from ..adapters.meetstream import (
     Binding,
     MeetStream,
@@ -531,7 +531,12 @@ class Handler(BaseHTTPRequestHandler):
         the chat is a small disappointment, whereas a webhook that 500s because of it
         loses the consultation, and MeetStream does not retry.
         """
-        reply = reply_to(utterance.text)
+        binding = utterance.binding
+        patient = (self.patients.get(binding.clinician, binding.patient_id)
+                   if binding else None)
+        # Presence questions first, then the record. Both are explicit rules; nothing
+        # here asks a model what the doctor meant.
+        reply = reply_to(utterance.text) or record_reply(utterance.text, patient)
         if not reply or not utterance.bot_id:
             return
         try:

@@ -83,3 +83,120 @@ def test_common_mishearings_of_the_name_still_work():
     guesses it actually makes."""
     assert reply_to("Kura, can you hear me?") is not None
     assert reply_to("Cora, are you there?") is not None
+
+
+# --- reading the record back --------------------------------------------------
+
+PATIENT = {
+    "id": "PT-10001", "name": "Amara Okafor", "dob": "1979-03-14",
+    "conditions": ["Type 2 diabetes", "Hypertension"],
+    "medications": ["Metformin 1000 mg BD", "Ramipril 5 mg OD"],
+    "allergies": ["Penicillin"],
+    "last_seen": "6 weeks ago", "consultations": 14,
+}
+
+
+def ask(text, patient=PATIENT):
+    from skillforge.core.wake import record_reply
+    return record_reply(text, patient)
+
+
+def test_it_reads_back_the_medications():
+    reply = ask("Cura, what medication is she on?")
+    assert "Metformin 1000 mg BD" in reply and "Ramipril 5 mg OD" in reply
+    assert "according to the record" in reply, "it must say where this came from"
+
+
+def test_it_reads_back_allergies_and_conditions():
+    assert "Penicillin" in ask("Cura, any allergies?")
+    assert "Type 2 diabetes" in ask("Cura, what's her history?")
+
+
+def test_it_can_say_who_the_consultation_is_with():
+    reply = ask("Cura, who is this patient?")
+    assert "Amara Okafor" in reply and "PT-10001" in reply
+
+
+def test_it_says_when_they_were_last_seen():
+    assert "6 weeks ago" in ask("Cura, when did we last see her?")
+
+
+def test_an_empty_field_says_so_rather_than_nothing():
+    """Silence would read as "it did not hear me", and the doctor asks again."""
+    reply = ask("Cura, any allergies?", {**PATIENT, "allergies": []})
+    assert "Nothing is recorded" in reply
+
+
+# --- the line it will not cross ----------------------------------------------
+
+
+@pytest.mark.parametrize("line", [
+    "Cura, should I increase the ramipril?",
+    "Cura, is it safe to stop the metformin?",
+    "Cura, what dose would you recommend?",
+    "Cura, do you think that's the diabetes?",
+    "Cura, should we start her on something else?",
+])
+def test_it_will_not_advise(line):
+    """Reading a record back and giving clinical advice are different products with
+    different risk profiles. This is the boundary, and it is enforced by explicit refusal
+    rather than by hoping a model stays in its lane."""
+    assert ask(line) is None
+
+
+def test_advice_wins_over_retrieval_when_a_question_is_both():
+    """"Should I increase her ramipril" matches the medication rule too. Advice is
+    checked first, or the retrieval rule would answer it."""
+    assert ask("Cura, should I increase her ramipril dose?") is None
+    assert ask("Cura, what medication is she taking?") is not None
+
+
+def test_it_cannot_be_asked_about_anybody_else():
+    """The only record it holds is the one this consultation is bound to. There is no
+    lookup to abuse — subject scoping, at the point of speech."""
+    reply = ask("Cura, what medication is Mrs Patel on?")
+    assert "Amara Okafor" in reply, "it answered about the bound patient, as it must"
+    assert "Patel" not in reply
+
+
+def test_no_record_means_no_answer():
+    assert ask("Cura, what medication is she on?", None) is None
+
+
+def test_it_still_ignores_the_room():
+    assert ask("She's been taking them every morning with breakfast.") is None
+
+
+# --- the record only changes when asked --------------------------------------
+
+
+@pytest.mark.parametrize("line", [
+    "Cura, update her record — she's on 10mg now.",
+    "Cura, add that to her notes.",
+    "Cura, put that on her record.",
+    "Cura, record that she's stopped the metformin.",
+])
+def test_an_explicit_instruction_is_recognised(line):
+    from skillforge.core.wake import update_requested
+    assert update_requested(line) is True
+
+
+@pytest.mark.parametrize("line", [
+    "She's on 10mg now.",
+    "I've been getting light-headed standing up.",
+    "We'll increase the ramipril to 10mg.",
+    "Cura, what medication is she on?",
+    "Update the prescription when you get a chance.",
+])
+def test_nothing_else_changes_the_record(line):
+    """A patient mentioning a new symptom is captured in the transcript and drafted into
+    the note. It does not touch the record until somebody says so — a record that edits
+    itself from overheard conversation is one no clinician trusts twice."""
+    from skillforge.core.wake import update_requested
+    assert update_requested(line) is False
+
+
+def test_an_instruction_without_the_name_is_not_for_the_bot():
+    """"Update her record" said to a receptionist is not an instruction to Cura."""
+    from skillforge.core.wake import update_requested
+    assert update_requested("Update her record with the new dose.") is False

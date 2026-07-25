@@ -748,9 +748,17 @@
                 [DATA.clinician.role, me.identifier, DATA.today]);
       // A real session shows the doctor's own state and nothing else. The fixture is
       // for the published preview, where there is no server to ask.
+      // PATIENTS is cleared *here*, not left until /patients answers. If that request
+      // fails — offline, a 500, a slow server — the catch below leaves whatever PATIENTS
+      // held, and what it held was the demo fixture. A real doctor would be looking at
+      // five patients who are not theirs, with no error to explain it. Empty is the only
+      // honest state for "signed in, list not loaded yet".
+      PATIENTS = [];
       SCHEDULE = [];
       draft = null;
       EVENTS_LIVE = [];
+      reindex();
+      renderAll();
       loadPatients();
       pollLive();
       show(view === "approve" ? "today" : view);
@@ -784,11 +792,19 @@
         reindex();
         selected = PATIENTS.some((p) => p.id === selected)
           ? selected : (PATIENTS[0] || {}).id;
-        renderPatients();
+        renderAll();
         renderNav();
+        renderSlots();
       })
-      .catch(() => {});
+      .catch(() => {
+        // Nothing to fall back to: the fixture is not this doctor's data. The Patients
+        // view already reads "No patients yet", which is wrong-but-harmless, where
+        // showing someone else's patients is neither.
+        patientsFailed = true;
+        renderAll();
+      });
   }
+  let patientsFailed = false;
 
   let livePoll = null;
   function pollLive() {
@@ -879,6 +895,23 @@
     }
   }
 
+  //: One renderer per view. A table rather than a chain of ifs so that adding a view
+  //: without wiring its refresh is impossible rather than merely unlikely.
+  const render = {
+    today: () => renderToday(),
+    patients: () => renderPatients(),
+    consult: () => renderConsult(),
+    approve: () => renderApprove(),
+  };
+
+  //: Repaint every view, not only the visible one. Hidden views keep their DOM, so when
+  //: the underlying data changes — signing in replaces the fixture wholesale — repainting
+  //: just the active panel leaves the others holding the old patients. They are invisible
+  //: but present, and one tab click brings them back.
+  function renderAll() {
+    for (const paint of Object.values(render)) paint();
+  }
+
   function show(next) {
     view = next;
     for (const tab of TABS) {
@@ -886,8 +919,11 @@
     }
     renderNav();
     renderSlots();
-    if (view === "patients") renderPatients();
-    if (view === "approve") renderApprove();
+    // Every view re-renders on show, not just some. Today and Consultation used to be
+    // built once at startup and never again, so they kept the demo fixture on screen
+    // after signing in cleared it — the nav said 0 appointments while the panel beside
+    // it still listed five. A view that renders once is a view that goes stale.
+    render[view] && render[view]();
     // Setting scrollTop rather than calling window.scrollTo: same effect, and it works in
     // embedding contexts that stub the scroll APIs out.
     document.documentElement.scrollTop = 0;
@@ -1769,10 +1805,6 @@
     "clinician sent, established before the meeting exists — never inferred from the " +
     "call. Writes are confined to the patient this consultation is bound to.";
 
-  renderToday();
-  renderPatients();
-  renderConsult();
-  renderApprove();
-  show("approve");
+  show(first("draft_ready") ? "approve" : "today");
 })();
 </script>

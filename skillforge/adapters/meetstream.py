@@ -19,10 +19,11 @@ Everything platform-shaped is confined to `normalize_transcript` and
 `normalize_lifecycle`. No MeetStream field name appears anywhere else in this codebase, so
 if the real payload differs from the documented one, the fix is one function and its test.
 
-Nothing here has been run against the live API — the key is set but MeetStream is in early
-access and no call has been made. The shapes are documented; the normalisers are tested
-against the documented examples verbatim. When a real payload arrives, capture it and add
-it as a fixture rather than adjusting code to match a memory of it.
+The API itself has been exercised: the key authenticates, and a dispatch was refused with
+"webhook_url is provided but no streaming provider found", which is why `recording_config`
+is now sent. The *webhook payloads* remain unverified — the shapes are documented and the
+normalisers are tested against the documented examples verbatim. When a real payload
+arrives, capture it as a fixture rather than adjusting code to match a memory of it.
 """
 
 from __future__ import annotations
@@ -38,6 +39,12 @@ from datetime import datetime
 from typing import Any
 
 API_ROOT = "https://api.meetstream.ai/api/v1"
+
+#: Transcription backends MeetStream accepts. `meetstream_streaming` is their own, so it
+#: is the only one that needs no second account; the rest want their own API key.
+PROVIDERS = ("meetstream_streaming", "deepgram_streaming", "assemblyai_streaming",
+             "jigsawstack_streaming", "sarvam_streaming", "meeting_captions")
+DEFAULT_PROVIDER = "meetstream_streaming"
 
 #: Where our binding lives inside `custom_attributes`. Namespaced so it cannot collide
 #: with anything MeetStream or another integration puts alongside it.
@@ -260,10 +267,18 @@ class MeetStream:
 
     api_key: str = ""
     root: str = API_ROOT
+    provider: str = ""
     _post: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.api_key = self.api_key or os.environ.get("MEETSTREAM_API_KEY", "")
+        self.provider = (self.provider
+                         or os.environ.get("MEETSTREAM_TRANSCRIPT_PROVIDER")
+                         or DEFAULT_PROVIDER)
+        if self.provider not in PROVIDERS:
+            raise MeetStreamError(
+                f"unknown transcription provider {self.provider!r} — "
+                f"one of: {', '.join(PROVIDERS)}")
 
     def send_bot(self, *, meeting_link: str, binding: Binding,
                  transcript_webhook: str, callback_url: str | None = None,
@@ -290,6 +305,18 @@ class MeetStream:
             # Echoed back on every event, which is the whole mechanism.
             "custom_attributes": binding.to_attributes(),
             "live_transcription_required": {"webhook_url": transcript_webhook},
+            # A webhook URL alone is refused: "webhook_url is provided but no streaming
+            # provider found". Something has to actually do the transcription, and
+            # MeetStream will not choose for you.
+            #
+            # `meetstream_streaming` is theirs, so it needs no third-party account. The
+            # alternatives (deepgram_streaming, assemblyai_streaming, jigsawstack_streaming,
+            # sarvam_streaming) each want their own key, and `meeting_captions` reads the
+            # platform's own captions — cheapest, but only as good as the platform's, and
+            # unavailable when a host has captions switched off.
+            "recording_config": {
+                "transcript": {"provider": {self.provider: {}}},
+            },
         }
         if callback_url:
             body["callback_url"] = callback_url

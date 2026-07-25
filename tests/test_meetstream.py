@@ -328,3 +328,34 @@ def test_a_whole_consultation_arrives_already_bound_to_its_patient():
     assert [u.role for u in utterances] == ["clinician", "patient", "clinician", "patient"]
     assert {u.binding.patient_id for u in utterances} == {"PT-10482"}
     assert all(u.binding.crm_id == "hs-contact-88412" for u in utterances)
+
+
+# --- transcription provider --------------------------------------------------
+
+
+def test_a_transcription_provider_is_always_sent():
+    """A webhook URL on its own is refused: "webhook_url is provided but no streaming
+    provider found". Something has to actually do the transcription, and MeetStream will
+    not pick one for you — observed as a 400 on the first real dispatch."""
+    ms, sent = client_recording()
+    ms.send_bot(meeting_link="https://meet.google.com/x", binding=BINDING,
+                transcript_webhook="https://x.test/h")
+
+    provider = sent["body"]["recording_config"]["transcript"]["provider"]
+    assert provider, "no streaming provider in the payload"
+    assert "meetstream_streaming" in provider
+
+
+def test_the_provider_is_configurable():
+    ms = MeetStream(api_key="k", provider="deepgram_streaming",
+                    _post=lambda m, p, b: b)
+    body = ms.send_bot(meeting_link="https://meet.google.com/x", binding=BINDING,
+                       transcript_webhook="https://x.test/h")
+    assert "deepgram_streaming" in body["recording_config"]["transcript"]["provider"]
+
+
+def test_an_unknown_provider_is_refused_before_any_call():
+    """MeetStream's own error lists the valid names, so a typo should be caught here
+    rather than costing a round trip and a confusing 400."""
+    with pytest.raises(MeetStreamError, match="unknown transcription provider"):
+        MeetStream(api_key="k", provider="whisper_but_made_up")

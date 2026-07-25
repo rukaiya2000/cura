@@ -60,11 +60,15 @@ function render({ me }) {
         // The only stub. matchMedia is deliberately left absent — the page must survive
         // without it, which is what its guard is for.
         win.fetch = (url) => {
-          if (!String(url).endsWith("/me")) return Promise.reject(new Error("not stubbed"));
+          const path = String(url);
+          const answer = (body) => Promise.resolve({
+            ok: true, status: 200, json: () => Promise.resolve(body) });
+          // Signed out, every endpoint is unreachable — that is what a static build is.
           if (!me) return Promise.reject(new TypeError("Failed to fetch"));
-          return Promise.resolve({
-            ok: true, status: 200, json: () => Promise.resolve(me),
-          });
+          if (path.endsWith("/me")) return answer(me);
+          if (path.endsWith("/patients")) return answer({ patients: [] });
+          if (path.endsWith("/live")) return answer({ consultations: [] });
+          return Promise.reject(new Error("not stubbed: " + path));
         };
       },
     });
@@ -72,6 +76,21 @@ function render({ me }) {
 }
 
 const settled = () => new Promise((r) => setTimeout(r, 120));
+
+/** Wait for a condition rather than for a duration.
+ *
+ * The signed-in page settles over a chain of requests — /me, then /patients, then a
+ * repaint — and a fixed delay that is long enough today is a flaky test tomorrow. This
+ * failed exactly that way: asserting at 120ms caught the page mid-chain and reported
+ * demo data that was gone 100ms later. */
+async function until(check, what, ms = 3000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try { if (check()) return; } catch { /* not ready */ }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
 
 // --- checks ----------------------------------------------------------------
 
@@ -531,6 +550,11 @@ async function main() {
   console.log("\n— signed in (/me answers) —");
   const live = render({ me: ME });
   await settled();
+  // The signed-in state is reached asynchronously; wait for it rather than assume it.
+  await until(() => live.doc.getElementById("preview-chip").hidden
+                    && /no patients yet|no appointments yet/i.test(
+                         live.doc.getElementById("view-today").textContent),
+              "the page to finish loading the doctor's own data");
 
   t("no script errors with a session", () =>
     assert(!live.errors.length, live.errors.join(" | ")));
@@ -567,9 +591,45 @@ async function main() {
     }
   });
 
-  t("the consultation still renders under a session", () =>
-    assert(live.doc.querySelector(".patient-bar h2").textContent === bound.patient.name,
-           "the patient bar changed once signed in"));
+  // Inverted deliberately. This used to assert the fixture survived a session, which is
+  // precisely the failure: a real doctor was shown a clinic list and a drafted letter for
+  // "Amara Okafor", a patient they have never met. Demo data on a real screen is the
+  // wrong-patient hazard this product exists to argue against.
+  t("no demo patient survives a real session", () => {
+    // The rendered app only. `body.textContent` also contains the <script> data island
+    // the page is built from, so asserting against it matches the fixture JSON and
+    // reports a leak that is not on screen — which it did.
+    const onScreen = [live.doc.querySelector(".app"), live.doc.getElementById("foot")]
+      .filter(Boolean).map((n) => n.textContent).join(" ");
+    for (const p of DATA.patients) {
+      assert(!onScreen.includes(p.name),
+             `${p.name} is still on screen for a signed-in clinician`);
+    }
+    // Every hidden panel too — invisible DOM is one tab click from visible.
+    for (const id of ["today", "patients", "consult", "approve"]) {
+      const panel = live.doc.getElementById(`view-${id}`).textContent;
+      for (const p of DATA.patients) {
+        assert(!panel.includes(p.name), `${p.name} is in the hidden ${id} panel`);
+      }
+    }
+  });
+
+  t("the signed-in clinic list is the doctor's own, and it is empty", () => {
+    live.doc.getElementById("tab-today").click();
+    const today = live.doc.getElementById("view-today").textContent;
+    assert(/no patients yet|no appointments yet/i.test(today),
+           `Today shows something other than an empty state: ${today.slice(0, 120)}`);
+    assert(!live.doc.querySelectorAll("#view-today .row-item").length,
+           "appointment rows rendered for a doctor with no appointments");
+  });
+
+  t("the consultation view waits for a real bot rather than replaying the demo", () => {
+    live.doc.getElementById("tab-consult").click();
+    const text = live.doc.getElementById("view-consult").textContent;
+    assert(/nothing in progress/i.test(text), text.slice(0, 140));
+    assert(!live.doc.querySelector(".patient-bar"),
+           "the fixture patient bar is still on a signed-in screen");
+  });
 
   live.dom.window.close();
 

@@ -811,3 +811,34 @@ def test_without_a_public_url_the_reason_is_stated(clinic):
 
     assert r.status == 503
     assert "tunnel" in json.loads(r.read())["error"].lower()
+
+
+def test_a_consultation_survives_a_restart(tmp_path):
+    """The one kind of data here that cannot be re-typed. A patient list lost to a restart
+    is an afternoon; a consultation lost to a restart means the conversation happened and
+    nothing remains of it."""
+    from skillforge.adapters.meetstream import Utterance
+    from skillforge.ui.serve import LiveConsultations
+
+    path = tmp_path / "consultations.json"
+    store = LiveConsultations(path=path)
+    store.said(Utterance(text="The morning readings are higher.", speaker="Amara Okafor",
+                         role="patient", at="2026-07-25T09:20:30", binding=HOOK_BINDING))
+
+    reopened = LiveConsultations(path=path)
+    room = reopened.get("con-0912")
+    assert room["said"][0]["text"] == "The morning readings are higher."
+    assert room["patient_id"] == "PT-10482"
+
+
+def test_patients_follow_a_changed_identifier(tmp_path):
+    """Fixing identity resolution changes the identifier — an opaque sub becomes an email
+    — and anything keyed by the old value silently disappears. That happened for real."""
+    store = PatientStore(path=tmp_path / "patients.json")
+    store.add("usr_9912", name="Sara")
+    store.add("usr_9912", name="Tomas")
+
+    found = store.list("priya@clinic.test", aliases=["priya@clinic.test", "usr_9912"])
+    assert [p["name"] for p in found] == ["Sara", "Tomas"]
+    assert store.list("usr_9912") == [], "rows were copied rather than moved"
+    assert [p["id"] for p in found] == ["PT-10001", "PT-10002"], "ids collided on merge"

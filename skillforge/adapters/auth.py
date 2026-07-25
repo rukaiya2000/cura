@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +37,18 @@ DEFAULT_SCOPES = "openid profile email offline_access"
 #: inline because `initials` must recognise it: an avatar reading "C" for
 #: "Clinician" looks like a real initial and hides that identity is missing.
 FALLBACK_NAME = "Clinician"
+
+
+def _debug(message: str) -> None:
+    """Print a diagnostic when SKILLFORGE_DEBUG_AUTH=1, and nothing otherwise.
+
+    **Claim names only, never values and never tokens.** A login that resolves to the
+    wrong identifier still looks like a successful login, so this is the only way to tell
+    "the provider omitted the claim" from "we rejected the token" — but a debug switch
+    that prints credentials is a worse problem than the one it solves.
+    """
+    if os.environ.get("SKILLFORGE_DEBUG_AUTH") == "1":
+        print(f"[auth] {message}", file=sys.stderr, flush=True)
 
 
 class AuthError(Exception):
@@ -86,6 +99,20 @@ class Session:
         point of acting rather than the point of signing in. The UI surfaces this.
         """
         return "@" in self.identifier
+
+    @property
+    def aliases(self) -> list[str]:
+        """Every key this person's data might already be filed under.
+
+        The identifier is the email when one can be resolved and the opaque `sub`
+        otherwise — so fixing identity resolution *changes* it for an existing user, and
+        anything keyed by the old value is orphaned. That happened: two patients were
+        added under `usr_…` and vanished from the list when the email started resolving.
+        The subject is stable across that change, so it stays as a lookup key even though
+        it is no longer the primary one.
+        """
+        keys = [self.identifier, str(self.claims.get("sub") or ""), self.email]
+        return [k for i, k in enumerate(keys) if k and k not in keys[:i]]
 
     def public(self) -> dict:
         """What may safely reach the browser — no tokens, ever."""
@@ -213,8 +240,29 @@ class Auth:
         # filed under the doctor's email.
         claims = self._claims(access)
         id_token = _get(result, "id_token") or ""
-        if id_token:
-            claims = {**self._id_claims(id_token), **{k: v for k, v in claims.items() if v}}
+        id_claims = self._id_claims(id_token) if id_token else {}
+        if id_claims:
+            claims = {**id_claims, **{k: v for k, v in claims.items() if v}}
+
+        # Names of the claims that arrived, never their values. Identity here fails in a
+        # way that looks like success — you are signed in, just as the wrong string — so
+        # the only way to tell an absent claim from a rejected token is to look.
+        # Neither token carries profile claims. Observed against a live Scalekit
+        # environment: the id token contains only amr/at_hash/aud/azp/c_hash/client_id/
+        # exp/iat/iss/sub, despite `openid profile email` being requested. So the profile
+        # is resolved from the directory instead, keyed by the `sub` we just verified.
+        #
+        # This is *not* the hole closed in `_subject`. That was reading an unsigned
+        # payload the browser delivered. This is a server-to-server lookup, authenticated
+        # with our own client credentials, keyed by a subject a signature already proved.
+        # The browser cannot influence which user is fetched.
+        if not claims.get("email"):
+            claims = {**claims, **self._profile(str(claims.get("sub") or ""))}
+
+        _debug("exchange returned id_token: %s" % bool(id_token))
+        _debug("access-token claims: %s" % sorted(self._claims(access)))
+        _debug("id-token claims:     %s" % sorted(id_claims))
+        _debug("merged claims:       %s" % sorted(claims))
             # Access-token claims win only where they are actually populated, so a `sub`
             # from the access token stays authoritative while `email` and `name` come from
             # the id token that carries them.
@@ -260,6 +308,33 @@ class Auth:
 
     # --- verification -------------------------------------------------------
 
+    def _profile(self, sub: str) -> dict:
+        """Email and name for a verified subject, from Scalekit's user directory.
+
+        Returns `{}` on any failure. Like `_id_claims` this only *enriches* — the access
+        token already established who this is, and being unable to look up a display name
+        is not a reason to refuse someone entry. The cost of failing is an opaque
+        identifier, which the UI already flags.
+        """
+        if not sub:
+            return {}
+        try:
+            response = self.client.users.get_user(sub)
+            user = _get(response[0] if isinstance(response, tuple) else response, "user")
+            profile = _get(user, "user_profile")
+            found = {
+                "email": _get(user, "email") or "",
+                "name": _get(profile, "name") or "",
+                "given_name": _get(profile, "given_name") or "",
+                "family_name": _get(profile, "family_name") or "",
+            }
+            resolved = {k: v for k, v in found.items() if v}
+            _debug(f"directory lookup for sub resolved: {sorted(resolved)}")
+            return resolved
+        except Exception as e:  # noqa: BLE001 — enrichment only
+            _debug(f"directory lookup failed: {type(e).__name__}: {e}")
+            return {}
+
     def _id_claims(self, id_token: str) -> dict:
         """Verify the id token and return its claims — or `{}` if it will not verify.
 
@@ -282,7 +357,9 @@ class Auth:
                 claims = _as_dict(self.client.validate_token(id_token, audience=audience))
                 if claims:
                     return claims
-            except Exception:  # noqa: BLE001 — try the next shape
+            except Exception as e:  # noqa: BLE001 — try the next shape
+                _debug(f"id token rejected with audience={audience!r}: "
+                       f"{type(e).__name__}: {e}")
                 continue
         return {}
 

@@ -126,7 +126,35 @@ class PatientStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.rows, indent=2))
 
-    def list(self, clinician: str) -> list[dict]:
+    def adopt(self, clinician: str, aliases: list[str]) -> None:
+        """Move rows filed under a previous key for this person onto the current one.
+
+        Identifiers change — an opaque `sub` becomes an email the moment profile
+        resolution starts working — and a patient list keyed by the old value simply
+        disappears. Migrating on read means the doctor never sees that happen.
+        """
+        moved = False
+        for alias in aliases:
+            if alias == clinician or alias not in self.rows:
+                continue
+            self.rows.setdefault(clinician, []).extend(self.rows.pop(alias))
+            moved = True
+        if moved:
+            # Ids were sequential per clinician, so merging two lists can collide.
+            seen, unique = set(), []
+            for patient in self.rows.get(clinician, []):
+                key = (patient["name"], patient.get("dob", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                patient["id"] = f"PT-{10000 + len(unique) + 1}"
+                unique.append(patient)
+            self.rows[clinician] = unique
+            self._save()
+
+    def list(self, clinician: str, aliases: list[str] | None = None) -> list[dict]:
+        if aliases:
+            self.adopt(clinician, aliases)
         return list(self.rows.get(clinician, ()))
 
     def get(self, clinician: str, patient_id: str) -> dict | None:
@@ -158,18 +186,33 @@ class PatientStore:
 class LiveConsultations:
     """Transcript arriving from meetings, filed by the consultation it is bound to.
 
-    In memory, like the session store, and for the same reason: a demo restart losing a
-    consultation costs nothing, whereas a database here would be the largest thing in the
-    repo and would prove nothing the design is claiming.
+    Persisted, like the patient list. A consultation is the record of what was said to a
+    patient — what both the letter and the clinical note are derived from — so losing it
+    to a restart means the conversation happened and nothing remains of it. It is also
+    the one kind of data here that cannot be re-entered by hand.
 
-    What it does insist on is that **every line files itself under the binding it carried**.
+    What it insists on is that **every line files itself under the binding it carried**.
     Nothing here looks up which consultation a line "probably" belongs to — the binding was
     fixed when the invite was sent and MeetStream echoes it on every event, so filing is a
     dictionary write rather than a decision. A line with no binding is dropped, because the
     alternative is guessing whose record it belongs in.
     """
 
+    path: Path | None = None
     rooms: dict[str, dict] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.path and self.path.is_file():
+            try:
+                self.rooms = json.loads(self.path.read_text())
+            except (json.JSONDecodeError, OSError):
+                self.rooms = {}
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.rooms, indent=2))
 
     def _room(self, binding) -> dict:
         return self.rooms.setdefault(binding.consultation_id, {
@@ -190,6 +233,7 @@ class LiveConsultations:
             "at": utterance.at, "who": utterance.role,
             "name": utterance.speaker, "text": utterance.text,
         })
+        self._save()
         return True
 
     def lifecycle(self, event) -> bool:
@@ -200,6 +244,7 @@ class LiveConsultations:
                           "live" if event.live else event.event)
         if event.refused:
             room["refused_reason"] = event.message or event.event
+        self._save()
         return True
 
     def dispatched(self, binding, bot_id: str) -> dict:
@@ -211,6 +256,7 @@ class LiveConsultations:
         room = self._room(binding)
         room["bot_id"] = bot_id
         room["status"] = "dispatched"
+        self._save()
         return room
 
     def get(self, consultation_id: str) -> dict | None:
@@ -346,7 +392,8 @@ class Handler(BaseHTTPRequestHandler):
         if route == PATIENTS_ROUTE:
             if session is None:
                 return self._json({"patients": []}, 401)
-            return self._json({"patients": self.patients.list(session.identifier)})
+            return self._json({"patients": self.patients.list(
+                session.identifier, aliases=session.aliases)})
 
         if route == "/live":
             if session is None:

@@ -95,21 +95,28 @@
   }
 
   .points { display: grid; gap: 1.4rem; }
-  .point { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.2rem 0.85rem; }
+
   /* A rule rather than an icon or a number: these are four independent guarantees, not a
-     sequence, and numbering them would claim an order the product does not have. */
-  .point::before {
-    content: ""; grid-row: 1 / span 2;
-    width: 2px; border-radius: 1px; background: var(--rule-strong);
+     sequence, and numbering them would claim an order the product does not have.
+     
+     `border-left`, not a grid pseudo-element. It was a `::before` spanning two rows of a
+     two-column grid, which works only while a point has exactly two children — the one
+     point that also carries a quotation had three, so the quote was auto-placed into the
+     2px rule column and rendered as a sliver. A border cannot count wrong. */
+  .point {
+    display: grid; gap: 0.2rem;
+    border-left: 2px solid var(--rule-strong);
+    padding-left: 0.9rem;
   }
-  .point[data-tone="refuse"]::before { background: var(--refused); }
-  .point[data-tone="hold"]::before { background: var(--attention); }
-  .point[data-tone="trace"]::before { background: var(--accent); }
+  .point[data-tone="refuse"] { border-left-color: var(--refused); }
+  .point[data-tone="hold"] { border-left-color: var(--attention); }
+  .point[data-tone="trace"] { border-left-color: var(--accent); }
   .point h3 { font-size: var(--step-0); }
   .point p { color: var(--ink-2); max-width: 46ch; }
   .point .said {
-    display: block; margin-top: 0.35rem;
-    font: var(--step--1) var(--note); color: var(--ink-3); font-style: italic;
+    display: block; margin-top: 0.4rem; padding-left: 0.7rem;
+    border-left: 1px solid var(--rule);
+    font: var(--step--1)/1.5 var(--note); color: var(--ink-3); font-style: italic;
   }
 
   /* --- the door ------------------------------------------------------- */
@@ -223,6 +230,11 @@
         <a class="btn" id="signin" href="/auth/login">Sign in</a>
         <div class="sep">new here</div>
         <a class="btn ghost" id="signup" href="/auth/signup">Create an account</a>
+
+        <!-- Says where the button leads. Being bounced to a domain you did not expect is
+             the moment a login stops feeling trustworthy. -->
+        <p class="next">You will be taken to Scalekit to authenticate, then straight
+          back here.</p>
 
         <!-- Not a footnote. Someone signing in should know why this asks for the account
              that already holds their calendar and CRM, rather than a new password. -->

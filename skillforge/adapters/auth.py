@@ -271,10 +271,20 @@ class Auth:
         Failure is soft because this only *enriches* identity: the access token has already
         established who this is. Losing a display name is not a reason to fail a login.
         """
-        try:
-            return _as_dict(self.client.validate_token(id_token))
-        except Exception:  # noqa: BLE001 — enrichment only; the access token stands alone
-            return {}
+        # An id token always carries `aud = client_id`, and the underlying JWT library
+        # raises when a token has an audience and the caller supplies none. Validating
+        # without it therefore fails every time — which is exactly what happened: a real
+        # login showed "Clinician" and an opaque `usr_…` identifier while this silently
+        # returned {}. The audience is tried first, then without, because a token that
+        # carries no `aud` fails the opposite way.
+        for audience in (os.environ.get("SCALEKIT_CLIENT_ID") or None, None):
+            try:
+                claims = _as_dict(self.client.validate_token(id_token, audience=audience))
+                if claims:
+                    return claims
+            except Exception:  # noqa: BLE001 — try the next shape
+                continue
+        return {}
 
     def _claims(self, token: str) -> dict:
         """Verify the token and return its claims.

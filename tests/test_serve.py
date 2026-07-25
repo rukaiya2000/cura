@@ -668,3 +668,146 @@ def test_another_clinicians_consultation_is_not_visible(hooks):
 
     assert [r["consultation_id"] for r in rooms] == ["con-0912"]
     assert "Not yours." not in json.dumps(rooms)
+
+
+# --- patients the doctor adds ------------------------------------------------
+
+from skillforge.ui.serve import PatientStore
+
+
+def post_json(made, path, payload):
+    request = urllib.request.Request(
+        made["base"] + path, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json"})
+    for cookie in made["jar"]:
+        request.add_header("Cookie", f"{cookie.name}={cookie.value}")
+    try:
+        return urllib.request.urlopen(request)
+    except urllib.error.HTTPError as e:
+        return e
+
+
+@pytest.fixture
+def clinic(site, tmp_path):
+    store = PatientStore(path=tmp_path / "patients.json")
+    made = site(patients=store)
+    made["patients"] = store
+    return made
+
+
+def test_the_patient_list_starts_empty(clinic):
+    """No baked-in patients. The first-run state is an empty list, and the UI must not
+    quietly fall back to demo people who are not this doctor's."""
+    sign_in(clinic)
+    r = fetch(clinic, "/patients", follow=True)
+    assert json.loads(r.read())["patients"] == []
+
+
+def test_adding_a_patient_needs_only_a_name(clinic):
+    sign_in(clinic)
+    r = post_json(clinic, "/patients", {"name": "Amara Okafor"})
+
+    assert r.status == 200
+    patient = json.loads(r.read())["patient"]
+    assert patient["name"] == "Amara Okafor"
+    assert patient["id"].startswith("PT-")
+
+
+def test_a_new_patient_is_clinically_empty(clinic):
+    """Conditions and history are what the consultations write. Asking the doctor to
+    type them up front would be asking them to do the product's job."""
+    sign_in(clinic)
+    patient = json.loads(post_json(clinic, "/patients",
+                                   {"name": "Grace Mensah"}).read())["patient"]
+
+    assert patient["conditions"] == []
+    assert patient["crm_id"] is None
+    assert patient["consultations"] == 0
+
+
+def test_a_patient_without_a_name_is_refused(clinic):
+    sign_in(clinic)
+    r = post_json(clinic, "/patients", {"name": "   "})
+    assert r.status == 400
+    assert "name" in json.loads(r.read())["error"].lower()
+
+
+def test_a_malformed_email_is_refused(clinic):
+    """This address is where a medical summary gets sent, and a typo there is the
+    wrong-recipient failure with no undo."""
+    sign_in(clinic)
+    r = post_json(clinic, "/patients", {"name": "Nia Patel", "email": "not-an-address"})
+    assert r.status == 400
+
+
+def test_adding_a_patient_requires_a_session(clinic):
+    r = post_json(clinic, "/patients", {"name": "Nobody"})
+    assert r.status == 401
+    assert clinic["patients"].rows == {}
+
+
+def test_patients_survive_a_restart(clinic, tmp_path):
+    """A session vanishing on restart is an inconvenience; a patient list vanishing
+    means re-typing every record, and nobody uses that twice."""
+    sign_in(clinic)
+    post_json(clinic, "/patients", {"name": "Tomas Lindqvist"})
+
+    reopened = PatientStore(path=tmp_path / "patients.json")
+    assert [p["name"] for p in reopened.list("priya.rao@clinic.test")] \
+        == ["Tomas Lindqvist"]
+
+
+def test_a_corrupt_patients_file_does_not_stop_the_app(tmp_path):
+    """Starting empty is recoverable. Refusing to start is not."""
+    path = tmp_path / "patients.json"
+    path.write_text("{not json")
+    assert PatientStore(path=path).list("anyone") == []
+
+
+def test_one_doctors_patients_are_not_another_doctors(clinic):
+    clinic["patients"].add("james@clinic.test", name="Someone Else")
+    sign_in(clinic)
+
+    listed = json.loads(fetch(clinic, "/patients", follow=True).read())["patients"]
+    assert listed == []
+
+
+# --- sending the bot ---------------------------------------------------------
+
+
+def test_sending_a_bot_requires_a_session(clinic):
+    r = post_json(clinic, "/bot/send", {"meeting_link": "https://meet.google.com/x",
+                                        "patient_id": "PT-10001"})
+    assert r.status == 401
+
+
+def test_a_bot_cannot_be_sent_for_a_patient_who_is_not_yours(clinic):
+    """The patient id comes from the request, so it is checked against *this* doctor's
+    list rather than trusted."""
+    clinic["patients"].add("james@clinic.test", name="Someone Else")
+    sign_in(clinic)
+
+    r = post_json(clinic, "/bot/send", {"meeting_link": "https://meet.google.com/x",
+                                        "patient_id": "PT-10001"})
+    assert r.status == 400
+    assert "your list" in json.loads(r.read())["error"]
+
+
+def test_a_meeting_link_must_look_like_a_url(clinic):
+    sign_in(clinic)
+    post_json(clinic, "/patients", {"name": "Amara Okafor"})
+    r = post_json(clinic, "/bot/send", {"meeting_link": "not a link",
+                                        "patient_id": "PT-10001"})
+    assert r.status == 400
+
+
+def test_without_a_public_url_the_reason_is_stated(clinic):
+    """MeetStream cannot deliver a transcript to 127.0.0.1. Saying so beats dispatching
+    a bot whose words can never come back."""
+    sign_in(clinic)
+    post_json(clinic, "/patients", {"name": "Amara Okafor"})
+    r = post_json(clinic, "/bot/send", {"meeting_link": "https://meet.google.com/abc",
+                                        "patient_id": "PT-10001"})
+
+    assert r.status == 503
+    assert "tunnel" in json.loads(r.read())["error"].lower()

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from skillforge.adapters.auth import Auth
 from skillforge.config import get, load_env
-from skillforge.ui.serve import make_server
+from skillforge.ui.serve import PatientStore, make_server
 
 BUILD = ROOT / "build"
 DIM, BOLD, GREEN, AMBER, RED, OFF = (
@@ -31,6 +31,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--public", default="",
+                        help="public https URL MeetStream can reach (cloudflared)")
     args = parser.parse_args()
 
     load_env()
@@ -56,10 +58,20 @@ def main() -> int:
         print(f"  {GREEN}login via Scalekit{OFF} {DIM}· redirect {redirect_uri}{OFF}")
         print(f"\n  {DIM}This redirect URI must be registered in the Scalekit dashboard, "
               f"or the provider will reject the callback.{OFF}")
+    if args.public:
+        print(f"  {GREEN}bot dispatch enabled{OFF} {DIM}· webhooks → {args.public}{OFF}")
+    else:
+        print(f"  {AMBER}no --public{OFF} {DIM}· the Send Cura button will explain that "
+              f"MeetStream cannot\n    reach this machine. Start a tunnel with "
+              f"`cloudflared tunnel --url http://{args.host}:{args.port}`{OFF}")
     print(f"\n  {DIM}ctrl-c to stop{OFF}\n")
 
+    #: Patients live next to the armory rather than in build/, which is generated and
+    #: safe to delete. Losing a patient list to a rebuild would be unforgivable.
     server = make_server(root=BUILD, auth=Auth(redirect_uri=redirect_uri),
-                         host=args.host, port=args.port)
+                         host=args.host, port=args.port,
+                         patients=PatientStore(path=ROOT / "data" / "patients.json"),
+                         public_url=args.public)
     if not args.no_browser:
         try:
             # `/`, not `/auth/login`. Going straight to the provider skips the page that

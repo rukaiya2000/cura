@@ -302,7 +302,7 @@ def test_profile_claims_are_taken_from_the_verified_id_token():
     class SplitTokens(FakeClient):
         def validate_access_token_and_get_claims(self, token):
             return {"sub": "usr_9912"}                  # access token: no profile claims
-        def validate_token(self, token):
+        def validate_token(self, token, audience=None):
             assert token == "it_live", token
             return {"sub": "usr_9912", "email": "Priya.Rao@clinic.test",
                     "name": "Dr Priya Rao"}
@@ -321,7 +321,7 @@ def test_an_id_token_that_will_not_verify_contributes_nothing():
     class BadIdToken(FakeClient):
         def validate_access_token_and_get_claims(self, token):
             return {"sub": "usr_9912"}
-        def validate_token(self, token):
+        def validate_token(self, token, audience=None):
             raise ValueError("signature mismatch")
 
     auth = Auth(redirect_uri="http://localhost/cb", client=BadIdToken())
@@ -335,7 +335,7 @@ def test_an_unverifiable_id_token_does_not_fail_the_login():
     """It only enriches identity; the access token already established who this is.
     Losing a display name is not a reason to refuse someone entry."""
     class BadIdToken(FakeClient):
-        def validate_token(self, token):
+        def validate_token(self, token, audience=None):
             raise ValueError("nope")
 
     auth = Auth(redirect_uri="http://localhost/cb", client=BadIdToken())
@@ -365,3 +365,46 @@ def test_initials_do_not_dress_up_a_missing_name():
     s = Session(identifier="usr_9912", email="", name="Clinician")
     assert s.initials != "C"
     assert s.initials == "U9"
+
+
+def test_the_id_token_is_validated_with_the_client_id_as_audience(monkeypatch):
+    """An id token always carries `aud = client_id`, and the JWT library raises when a
+    token has an audience and none is supplied. Validating without it fails every time —
+    which is what produced a real login showing "Clinician" and an opaque usr_ identifier
+    while the enrichment silently returned {}."""
+    monkeypatch.setenv("SCALEKIT_CLIENT_ID", "cli_abc123")
+    seen = []
+
+    class AudienceStrict(FakeClient):
+        def validate_access_token_and_get_claims(self, token):
+            return {"sub": "usr_9912"}
+        def validate_token(self, token, audience=None):
+            seen.append(audience)
+            if audience != "cli_abc123":
+                raise ValueError("Audience doesn't match")
+            return {"sub": "usr_9912", "email": "priya.rao@clinic.test",
+                    "name": "Dr Priya Rao"}
+
+    auth = Auth(redirect_uri="http://localhost/cb", client=AudienceStrict())
+    session = auth.callback(code="abc", state=login(auth))
+
+    assert seen[0] == "cli_abc123", "the client id was not offered as the audience"
+    assert session.identifier == "priya.rao@clinic.test"
+    assert session.identifies_by_email is True
+
+
+def test_an_id_token_without_an_audience_still_validates(monkeypatch):
+    """The opposite failure: a token carrying no `aud` rejects one that is supplied."""
+    monkeypatch.setenv("SCALEKIT_CLIENT_ID", "cli_abc123")
+
+    class NoAudience(FakeClient):
+        def validate_access_token_and_get_claims(self, token):
+            return {"sub": "usr_9912"}
+        def validate_token(self, token, audience=None):
+            if audience is not None:
+                raise ValueError("Invalid audience")
+            return {"sub": "usr_9912", "email": "priya.rao@clinic.test"}
+
+    auth = Auth(redirect_uri="http://localhost/cb", client=NoAudience())
+    assert auth.callback(code="abc",
+                         state=login(auth)).identifier == "priya.rao@clinic.test"

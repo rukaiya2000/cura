@@ -35,6 +35,9 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from ..adapters.auth import Auth, AuthError, Session
 from ..adapters.meetstream import (
+    Binding,
+    MeetStream,
+    MeetStreamError,
     normalize_lifecycle,
     normalize_transcript,
     verify_signature,
@@ -47,6 +50,8 @@ SIGNIN = "signin.html"
 SIGNIN_ROUTE = "/signin"
 TRANSCRIPT_HOOK = "/hooks/transcript"
 LIFECYCLE_HOOK = "/hooks/bot"
+SEND_BOT_ROUTE = "/bot/send"
+PATIENTS_ROUTE = "/patients"
 #: A transcript turn is a sentence. Anything approaching a megabyte is not one, and
 #: reading an unbounded Content-Length from an unauthenticated caller is how a public
 #: endpoint becomes a memory exhaustion bug.
@@ -83,6 +88,70 @@ class SessionStore:
 
     def __len__(self) -> int:
         return len(self._rows)
+
+
+@dataclass
+class PatientStore:
+    """The doctor's own patients, added through the UI.
+
+    Persisted to a JSON file rather than kept in memory: a session vanishing on restart is
+    an inconvenience, but a patient list vanishing means re-typing every record, and
+    nobody would use it twice.
+
+    **A new patient starts clinically empty** — name, date of birth and how to reach them,
+    nothing else. Conditions, medications and history are not asked for, because they are
+    what the consultations are going to write. That is the product working, not a gap in
+    the form.
+
+    Patients are filed under the clinician who added them. This is a demo-grade boundary,
+    not a claim about multi-tenancy: it stops one doctor's list appearing on another's
+    screen, and nothing more.
+    """
+
+    path: Path | None = None
+    rows: dict[str, list[dict]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.path and self.path.is_file():
+            try:
+                self.rows = json.loads(self.path.read_text())
+            except (json.JSONDecodeError, OSError):
+                # A corrupt file must not stop the app booting. Starting empty is
+                # recoverable; refusing to start is not.
+                self.rows = {}
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.rows, indent=2))
+
+    def list(self, clinician: str) -> list[dict]:
+        return list(self.rows.get(clinician, ()))
+
+    def get(self, clinician: str, patient_id: str) -> dict | None:
+        return next((p for p in self.rows.get(clinician, ())
+                     if p["id"] == patient_id), None)
+
+    def add(self, clinician: str, *, name: str, dob: str = "", email: str = "",
+            nhs: str = "") -> dict:
+        mine = self.rows.setdefault(clinician, [])
+        patient = {
+            # Sequential per clinician, so an id is readable in a demo and stable across
+            # restarts. A real deployment takes this from the record system.
+            "id": f"PT-{10000 + len(mine) + 1}",
+            "name": name.strip(),
+            "dob": dob.strip(),
+            "email": email.strip().lower(),
+            "nhs": nhs.strip(),
+            "crm_id": None,          # no record until one is created, deliberately
+            "conditions": [],
+            "consultations": 0,
+            "added_by": clinician,
+        }
+        mine.append(patient)
+        self._save()
+        return patient
 
 
 @dataclass
@@ -133,6 +202,17 @@ class LiveConsultations:
             room["refused_reason"] = event.message or event.event
         return True
 
+    def dispatched(self, binding, bot_id: str) -> dict:
+        """Register the room the moment a bot is sent, before any webhook arrives.
+
+        Without this the screen shows nothing for the twenty-odd seconds it takes a bot
+        to join, and the doctor reasonably concludes the button did not work.
+        """
+        room = self._room(binding)
+        room["bot_id"] = bot_id
+        room["status"] = "dispatched"
+        return room
+
     def get(self, consultation_id: str) -> dict | None:
         return self.rooms.get(consultation_id)
 
@@ -171,7 +251,9 @@ class Handler(BaseHTTPRequestHandler):
     store: SessionStore
     public_paths: frozenset[str]
     consultations: "LiveConsultations"
+    patients: "PatientStore"
     hook_secret: str
+    public_url: str
 
     # --- plumbing ----------------------------------------------------------
 
@@ -261,6 +343,11 @@ class Handler(BaseHTTPRequestHandler):
         # Live transcript, for the consultation screen to poll. Behind the gate and
         # scoped to the signed-in clinician — the webhook that fills this is public, but
         # what it collects is a patient conversation and only its own doctor may read it.
+        if route == PATIENTS_ROUTE:
+            if session is None:
+                return self._json({"patients": []}, 401)
+            return self._json({"patients": self.patients.list(session.identifier)})
+
         if route == "/live":
             if session is None:
                 return self._json({"consultations": []}, 401)
@@ -286,6 +373,14 @@ class Handler(BaseHTTPRequestHandler):
         accepted and does no work the response has to wait for.
         """
         route = urlparse(self.path).path.rstrip("/") or "/"
+
+        # Dispatching a bot is the doctor acting, so unlike the webhooks below it is
+        # behind the session gate and carries no signature.
+        if route == SEND_BOT_ROUTE:
+            return self.send_bot()
+        if route == PATIENTS_ROUTE:
+            return self.add_patient()
+
         if route not in (TRANSCRIPT_HOOK, LIFECYCLE_HOOK):
             return self._text("Not found", 404)
 
@@ -317,6 +412,96 @@ class Handler(BaseHTTPRequestHandler):
                 self.consultations.lifecycle(event)
 
         return self._json({"ok": True, "kept": event is not None})
+
+    def add_patient(self):
+        """Add a patient to the signed-in doctor's list.
+
+        Only a name is required. Asking for conditions and history up front would be
+        asking the doctor to type what the consultations are about to write.
+        """
+        session = self.store.get(self._sid())
+        if session is None:
+            return self._json({"error": "Sign in first."}, 401)
+
+        length = min(int(self.headers.get("Content-Length") or 0), MAX_HOOK_BYTES)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._json({"error": "Bad request."}, 400)
+
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return self._json({"error": "A patient needs a name."}, 400)
+        if len(name) > 120:
+            return self._json({"error": "That name is too long."}, 400)
+
+        email = str(body.get("email") or "").strip()
+        if email and "@" not in email:
+            # Checked because this address is where a medical summary will be sent, and
+            # a typo there is the wrong-recipient failure with no undo.
+            return self._json({"error": "That does not look like an email address."}, 400)
+
+        patient = self.patients.add(
+            session.identifier, name=name, dob=str(body.get("dob") or ""),
+            email=email, nhs=str(body.get("nhs") or ""))
+        return self._json({"ok": True, "patient": patient})
+
+    def send_bot(self):
+        """Put the bot in a meeting, bound to the patient the doctor picked.
+
+        The binding is built **here, from the session and the chosen patient** — never
+        from anything the browser sent beyond the patient id. A request that could name
+        its own `clinician` would let one doctor dispatch a bot acting as another.
+        """
+        session = self.store.get(self._sid())
+        if session is None:
+            return self._json({"error": "Sign in first."}, 401)
+
+        length = min(int(self.headers.get("Content-Length") or 0), MAX_HOOK_BYTES)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._json({"error": "Bad request."}, 400)
+
+        link = str(body.get("meeting_link") or "").strip()
+        patient_id = str(body.get("patient_id") or "").strip()
+        if not link.startswith(("https://", "http://")):
+            return self._json({"error": "That does not look like a meeting link."}, 400)
+
+        patient = self.patients.get(session.identifier, patient_id)
+        if patient is None:
+            return self._json({"error": f"No patient {patient_id} on your list."}, 400)
+
+        if not self.public_url:
+            return self._json({"error":
+                "This server has no public address, so MeetStream cannot deliver the "
+                "transcript back. Start a tunnel and restart with --public."}, 503)
+
+        binding = Binding(
+            consultation_id=f"con-{patient['id'].lower()}",
+            patient_id=patient["id"], patient_name=patient["name"],
+            clinician=session.identifier,          # from the session, never the request
+            clinician_name=session.name,
+            crm_id=patient["crm_id"],
+        )
+        base = self.public_url.rstrip("/")
+        try:
+            result = MeetStream().send_bot(
+                meeting_link=link, binding=binding,
+                transcript_webhook=f"{base}{TRANSCRIPT_HOOK}",
+                callback_url=f"{base}{LIFECYCLE_HOOK}",
+                bot_name=os.environ.get("MEETSTREAM_BOT_NAME") or "Cura",
+            )
+        except MeetStreamError as e:
+            return self._json({"error": str(e)}, 502)
+
+        # Register the room immediately so the screen has something to show before the
+        # first webhook lands — otherwise the doctor gets nothing back for ~20 seconds
+        # and reasonably concludes it did not work.
+        self.consultations.dispatched(binding, result.get("bot_id", ""))
+        return self._json({"ok": True, "bot_id": result.get("bot_id", ""),
+                           "consultation_id": binding.consultation_id,
+                           "patient_name": patient["name"]})
 
     def start(self, *, signup: bool):
         """Hand off to the provider. Sign-in and sign-up differ only in which screen
@@ -368,6 +553,12 @@ class Handler(BaseHTTPRequestHandler):
 
         body = target.read_bytes()
         kind = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        # Without an explicit charset a browser decodes UTF-8 bytes as Latin-1, so every
+        # `·` became `Â·` and every `—` became `â€"` across the whole app. The pages are
+        # UTF-8; say so rather than hoping the browser guesses.
+        if kind.startswith("text/") or kind in ("application/javascript",
+                                                "application/json"):
+            kind = f"{kind}; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
@@ -381,14 +572,17 @@ class Handler(BaseHTTPRequestHandler):
 def make_server(*, root: Path, auth: Auth, host: str = "127.0.0.1", port: int = 8770,
                 store: SessionStore | None = None,
                 consultations: "LiveConsultations | None" = None,
-                hook_secret: str = "",
+                patients: "PatientStore | None" = None,
+                hook_secret: str = "", public_url: str = "",
                 public_paths: frozenset[str] = frozenset()) -> ThreadingHTTPServer:
     """A server bound to `root`, with login in front of everything but `public_paths`."""
     namespace = {
         "root": Path(root).resolve(),
         "auth": auth,
         "consultations": consultations if consultations is not None else LiveConsultations(),
+        "patients": patients if patients is not None else PatientStore(),
         "hook_secret": hook_secret or os.environ.get("MEETSTREAM_WEBHOOK_SECRET", ""),
+        "public_url": public_url,
         # `is None`, not `or` — SessionStore defines __len__, so an empty store is falsy.
         # `store or SessionStore()` silently replaced a caller's fresh store with a second
         # one, and the symptom was sessions that appeared to be created and then weren't

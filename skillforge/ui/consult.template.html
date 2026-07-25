@@ -136,6 +136,35 @@
     font: 600 0.68rem var(--sans); letter-spacing: 0.05em; text-transform: uppercase;
   }
   .preview-chip[hidden] { display: none; }
+  .icon-btn {
+    display: grid; place-items: center; width: 1.6rem; height: 1.6rem;
+    border-radius: var(--radius); border: 1px solid var(--rule-strong);
+    background: transparent; color: var(--accent);
+    font: 400 1.15rem/1 var(--sans); cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+  .add-form {
+    display: grid; gap: 0.7rem; padding: var(--pad);
+    border-bottom: 1px solid var(--rule); background: var(--panel-2);
+  }
+  .field { display: grid; gap: 0.25rem; }
+  .field input {
+    font: var(--step-0) var(--sans); color: var(--ink);
+    padding: 0.45rem 0.6rem; border: 1px solid var(--rule-strong);
+    border-radius: var(--radius); background: var(--panel);
+  }
+  .field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .form-note { color: var(--ink-3); font-size: var(--step--1); line-height: 1.5; }
+  .form-error { color: var(--refused); font-size: var(--step--1); }
+  .form-error[hidden] { display: none; }
+  .add-form .btn {
+    padding: 0.55rem 1rem; border-radius: var(--radius);
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    font: 600 var(--step-0) var(--sans); cursor: pointer;
+  }
+  .add-form .btn:disabled { opacity: 0.5; cursor: progress; }
+
   .preview-chip[data-tone="warn"] {
     color: var(--attention); border-color: var(--attention);
     background: rgba(150, 96, 11, 0.07); cursor: help;
@@ -671,12 +700,20 @@
   };
   const first = (type) => EVENTS.find((e) => e.type === type);
   const all = (type) => EVENTS.filter((e) => e.type === type);
-  const byId = new Map(DATA.patients.map((p) => [p.id, p]));
+  // Patients come from the server once signed in. DATA.patients is the demo fixture and
+  // only stands in when there is no server behind the page — the published preview.
+  let PATIENTS = DATA.patients;
+  let SCHEDULE = DATA.schedule;
+  let EVENTS_LIVE = null;             // null = show the fixture consultation
+  let byId = new Map(PATIENTS.map((p) => [p.id, p]));
+  const reindex = () => { byId = new Map(PATIENTS.map((p) => [p.id, p])); };
   const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:` +
                        `${String(Math.floor(s % 60)).padStart(2, "0")}`;
   const STATUS_TEXT = { done: "Seen", in_progress: "In progress", upcoming: "Upcoming" };
 
   let view = "today";
+  let adding = false;                 // the + form is open
+  let busy = null;                    // an in-flight request, so buttons can disable
   let selected = DATA.active_patient;
 
   // --- chrome --------------------------------------------------------
@@ -709,6 +746,14 @@
       // under, so seeing it is how the doctor knows *which* connected account is acting.
       renderWho(me.name, me.initials,
                 [DATA.clinician.role, me.identifier, DATA.today]);
+      // A real session shows the doctor's own state and nothing else. The fixture is
+      // for the published preview, where there is no server to ask.
+      SCHEDULE = [];
+      draft = null;
+      EVENTS_LIVE = [];
+      loadPatients();
+      pollLive();
+      show(view === "approve" ? "today" : view);
 
       // An identifier that is not an email means the token carried no email claim and
       // fell back to `sub`. Sign-in still succeeds, so nothing looks wrong — but the
@@ -726,6 +771,41 @@
       }
     })
     .catch(() => { $("preview-chip").hidden = false; });
+
+  function loadPatients() {
+    return fetch("/patients", { credentials: "same-origin", cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        // The doctor's own list replaces the fixture entirely — including when it is
+        // empty, which is the correct first-run state and must not silently fall back
+        // to demo patients that are not theirs.
+        PATIENTS = d.patients;
+        reindex();
+        selected = PATIENTS.some((p) => p.id === selected)
+          ? selected : (PATIENTS[0] || {}).id;
+        renderPatients();
+        renderNav();
+      })
+      .catch(() => {});
+  }
+
+  let livePoll = null;
+  function pollLive() {
+    if (livePoll) return;
+    livePoll = setInterval(() => {
+      fetch("/live", { credentials: "same-origin", cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d) return;
+          LIVE = d.consultations;
+          if (view === "consult") renderConsult();
+          renderNav();
+        })
+        .catch(() => {});
+    }, 3000);
+  }
+  let LIVE = [];
 
   $("signout").onclick = (e) => {
     if (live) return;               // a real session: let the link reach /auth/logout
@@ -756,8 +836,8 @@
   }
 
   const TABS = [
-    { id: "today", label: "Today", count: () => DATA.schedule.length },
-    { id: "patients", label: "Patients", count: () => DATA.patients.length },
+    { id: "today", label: "Today", count: () => SCHEDULE.length },
+    { id: "patients", label: "Patients", count: () => PATIENTS.length },
     { id: "consult", label: "Consultation", count: () => null },
     { id: "approve", label: "Approval",
       count: () => (draft && send.state !== "sent" ? 1 : null) },
@@ -773,17 +853,17 @@
       b.append(el("span", null, tab.label));
       const n = tab.count();
       if (n != null) b.append(el("span", "count", String(n)));
-      if (tab.id === "consult" && inProgress) b.append(el("span", "live-dot"));
+      if (tab.id === "consult" && inProgress()) b.append(el("span", "live-dot"));
       b.onclick = () => show(tab.id);
       $("nav").append(b);
     }
   }
 
-  const inProgress = DATA.schedule.find((s) => s.status === "in_progress");
+  const inProgress = () => SCHEDULE.find((s) => s.status === "in_progress");
 
   function renderSlots() {
     $("slots").textContent = "";
-    for (const slot of DATA.schedule) {
+    for (const slot of SCHEDULE) {
       const p = byId.get(slot.patient);
       const b = el("button", "slot");
       b.dataset.status = slot.status;
@@ -822,14 +902,28 @@
     head.append(el("h2", null, "Today"), el("span", "sub", DATA.today));
     root.append(head);
 
+    if (!SCHEDULE.length) {
+      const empty = el("section", "card");
+      const body = el("div", "empty");
+      body.append(el("p", "prose",
+        PATIENTS.length
+          ? "No appointments yet. Open a patient and paste a meeting link to start a "
+            + "consultation."
+          : "No patients yet. Add one from the Patients tab, then paste a meeting link "
+            + "to start a consultation."));
+      empty.append(body);
+      root.append(empty);
+      return;
+    }
+
     const card = el("section", "card");
     const header = el("header");
     header.append(el("h3", "label", "Clinic list"),
-                  el("span", "label", `${DATA.schedule.length} appointments`));
+                  el("span", "label", `${SCHEDULE.length} appointments`));
     card.append(header);
 
     const rows = el("div", "rows");
-    for (const slot of DATA.schedule) {
+    for (const slot of SCHEDULE) {
       const p = byId.get(slot.patient);
       const row = el("button", "row-item");
       row.append(el("span", "when", slot.time));
@@ -878,6 +972,7 @@
     const left = el("div", "col");
     const right = el("div", "col");
 
+    if (patient) left.append(meetingCard(patient));
     if (patient && patient.crm_id) {
       left.append(recordCard(DATA.context));
       left.append(historyCard(DATA.history));
@@ -912,11 +1007,25 @@
     const card = el("section", "card");
     const header = el("header");
     header.append(el("h3", "label", "Patients"),
-                  el("span", "label", `${DATA.patients.length} registered`));
+                  el("span", "label", `${PATIENTS.length} registered`));
+    const add = el("button", "icon-btn", "+");
+    add.title = "Add a patient";
+    add.setAttribute("aria-label", "Add a patient");
+    add.onclick = () => { adding = !adding; renderPatients(); };
+    header.append(add);
     card.append(header);
 
+    if (adding) card.append(addPatientForm());
+
+    if (!PATIENTS.length) {
+      card.append(el("div", "empty",
+        "No patients yet. Use + to add the first one — the record fills itself in " +
+        "from your consultations."));
+      return card;
+    }
+
     const rows = el("div", "rows");
-    for (const p of DATA.patients) {
+    for (const p of PATIENTS) {
       const row = el("button", "row-item");
       row.setAttribute("aria-current", String(p.id === selected));
       row.append(el("span", "when", p.id.replace("PT-", "")));
@@ -924,7 +1033,9 @@
       const who = el("div", "who");
       who.append(el("b", null, p.name));
       const meta = el("div", "meta");
-      meta.append(document.createTextNode(`${p.age} · ${p.conditions.join(", ") || "no conditions recorded"}`));
+      const bits = [p.age ? `${p.age}` : p.dob,
+                    (p.conditions || []).join(", ") || "no conditions recorded"];
+      meta.append(document.createTextNode(bits.filter(Boolean).join(" · ")));
       who.append(meta);
       row.append(who);
 
@@ -940,6 +1051,118 @@
       rows.append(row);
     }
     card.append(rows);
+    return card;
+  }
+
+  function field(label, key, opts = {}) {
+    const wrap = el("label", "field");
+    wrap.append(el("span", "label", label));
+    const input = el("input");
+    input.type = opts.type || "text";
+    input.name = key;
+    input.placeholder = opts.placeholder || "";
+    if (opts.required) input.required = true;
+    wrap.append(input);
+    return wrap;
+  }
+
+  function addPatientForm() {
+    const form = el("form", "add-form");
+    form.append(field("Name", "name", { required: true, placeholder: "Amara Okafor" }));
+    form.append(field("Date of birth", "dob", { type: "date" }));
+    // The address a medical summary will eventually be sent to. Collected now so it is
+    // on the record before anything needs it, rather than typed in a hurry at send time.
+    form.append(field("Email", "email", { type: "email",
+                                          placeholder: "where summaries are sent" }));
+    form.append(field("NHS number", "nhs", { placeholder: "optional" }));
+
+    const note = el("p", "form-note",
+      "Name is enough. Conditions, medications and history are written by the " +
+      "consultations — that is the point, so the form does not ask for them.");
+    form.append(note);
+
+    const err = el("p", "form-error");
+    err.hidden = true;
+    form.append(err);
+
+    const save = el("button", "btn", "Add patient");
+    save.type = "submit";
+    form.append(save);
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(form).entries());
+      if (!String(body.name || "").trim()) {
+        err.textContent = "A patient needs a name."; err.hidden = false; return;
+      }
+      save.disabled = true; save.textContent = "Adding…";
+      fetch("/patients", { method: "POST", credentials: "same-origin",
+                           headers: { "Content-Type": "application/json" },
+                           body: JSON.stringify(body) })
+        .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+          if (!ok) throw new Error(d.error || "Could not add that patient.");
+          PATIENTS = PATIENTS.concat([d.patient]);
+          reindex();
+          selected = d.patient.id;
+          adding = false;
+          renderPatients();
+        })
+        .catch((e2) => {
+          err.textContent = live ? e2.message
+            : "No server behind this page — this is the published preview.";
+          err.hidden = false;
+          save.disabled = false; save.textContent = "Add patient";
+        });
+    };
+    return form;
+  }
+
+  function meetingCard(patient) {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "label", "Start a consultation"));
+    card.append(header);
+
+    const body = el("div", "body");
+    body.append(el("p", "prose",
+      `Paste the meeting link and Cura joins, already knowing this consultation is ` +
+      `about ${patient.name}. Nothing on the call decides that — you did, here.`));
+
+    const form = el("form", "add-form");
+    form.append(field("Meeting link", "meeting_link",
+                      { required: true, placeholder: "https://meet.google.com/…" }));
+    const err = el("p", "form-error");
+    err.hidden = true;
+    form.append(err);
+
+    const go = el("button", "btn", `Send Cura to this meeting`);
+    go.type = "submit";
+    form.append(go);
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const link = new FormData(form).get("meeting_link");
+      go.disabled = true; go.textContent = "Sending…";
+      fetch("/bot/send", { method: "POST", credentials: "same-origin",
+                           headers: { "Content-Type": "application/json" },
+                           body: JSON.stringify({ meeting_link: link,
+                                                  patient_id: patient.id }) })
+        .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+          if (!ok) throw new Error(d.error || "Could not send the bot.");
+          go.textContent = "Cura is joining…";
+          pollLive();
+        })
+        .catch((e2) => {
+          err.textContent = live ? e2.message
+            : "No server behind this page — this is the published preview.";
+          err.hidden = false;
+          go.disabled = false; go.textContent = "Send Cura to this meeting";
+        });
+    };
+    body.append(form);
+    card.append(body);
     return card;
   }
 
@@ -1008,6 +1231,8 @@
   function renderConsult() {
     const root = $("view-consult");
     root.textContent = "";
+
+    if (EVENTS_LIVE !== null) return renderLiveConsult(root);
 
     const bound = first("patient_bound");
     if (!bound) {
@@ -1176,6 +1401,58 @@
     root.append(cols);
   }
 
+  function renderLiveConsult(root) {
+    const head = el("div", "view-head");
+    head.append(el("h2", null, "Consultation"));
+    root.append(head);
+
+    if (!LIVE.length) {
+      const card = el("section", "card");
+      const body = el("div", "empty");
+      body.append(el("p", "prose",
+        "Nothing in progress. Open a patient, paste a meeting link, and Cura joins " +
+        "already knowing who the consultation is about."));
+      card.append(body);
+      root.append(card);
+      return;
+    }
+
+    for (const room of LIVE) {
+      const card = el("section", "card");
+      const header = el("header");
+      header.append(el("h3", "label", room.patient_name || room.patient_id));
+      const pill = el("span", "pill", STATUS_TEXT[room.status] || room.status);
+      pill.dataset.kind = room.status === "live" ? "in_progress"
+                        : room.status === "ended" ? "done" : "upcoming";
+      header.append(pill);
+      card.append(header);
+
+      const body = el("div", "body");
+      if (room.refused_reason) {
+        const warn = el("p", "why");
+        warn.append(el("b", null, "The bot did not get in: "),
+                    document.createTextNode(room.refused_reason));
+        body.append(warn);
+      }
+      if (!room.said.length) {
+        body.append(el("p", "prose",
+          room.status === "dispatched"
+            ? "Cura has been sent and is joining. Admit it from the meeting's host "
+              + "controls if it lands in the lobby."
+            : "In the room, listening. Lines appear here as they are spoken."));
+      } else {
+        for (const line of room.said) {
+          const said = el("div", "said");
+          said.dataset.who = line.who;
+          said.append(el("div", "who", line.name), el("div", "text", `“${line.text}”`));
+          body.append(said);
+        }
+      }
+      card.append(body);
+      root.append(card);
+    }
+  }
+
   function headerOf(text) {
     const h = el("header");
     h.append(el("h3", "label", text));
@@ -1197,7 +1474,11 @@
   // are kept alongside the original, because the diff is the evidence the letter was
   // actually read — and later it is the best training signal there is.
 
-  const draft = first("draft_ready");
+  //: The scripted draft belongs to the fixture only. Once there is a real session it is
+  //: dropped entirely — a letter addressed to a patient the doctor has never met is the
+  //: wrong-patient failure this whole product argues against, and showing it as a demo
+  //: does not make it less alarming on a real screen.
+  let draft = first("draft_ready");
   const saidById = new Map(all("said").map((s) => [s.id, s]));
 
   //: The send state machine. `holding` is a real delay with a working cancel, because

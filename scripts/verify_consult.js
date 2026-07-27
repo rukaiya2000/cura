@@ -193,10 +193,10 @@ async function main() {
   console.log("\n— the consultation —");
 
   t("the page opens on whatever is waiting for the doctor", () => {
-    // Approval, because something is sitting there unsent. If the draft were gone the
-    // consultation would be the right landing view instead.
+    // Approval, because something is sitting there unsent. With no draft it lands on
+    // Patients — a doctor opens a person, not a stage of a process.
     assert(doc.getElementById("view-approve").dataset.active === "true");
-    assert(doc.getElementById("view-today").dataset.active === "false");
+    assert(doc.getElementById("view-patients").dataset.active === "false");
   });
 
   t("the consultation view renders", () => {
@@ -465,19 +465,6 @@ async function main() {
 
   const clickTab = (id) => doc.getElementById(`tab-${id}`).click();
 
-  t("Today lists every appointment with its patient", () => {
-    clickTab("today");
-    const rows = doc.querySelectorAll("#view-today .row-item");
-    assert(rows.length === DATA.schedule.length,
-           `${rows.length} rows, ${DATA.schedule.length} appointments`);
-    const body = doc.getElementById("view-today").textContent;
-    for (const slot of DATA.schedule) {
-      const p = DATA.patients.find((x) => x.id === slot.patient);
-      assert(body.includes(slot.time), `${slot.time} missing`);
-      if (p) assert(body.includes(p.name), `${p.name} missing from the clinic list`);
-    }
-  });
-
   t("Patients shows the record and history for a patient with a CRM id", () => {
     clickTab("patients");
     const body = doc.getElementById("view-patients").textContent;
@@ -509,9 +496,9 @@ async function main() {
   });
 
   t("switching views leaves exactly one visible", () => {
-    for (const id of ["today", "patients", "consult"]) {
+    for (const id of ["patients", "consult", "approve"]) {
       clickTab(id);
-      const active = ["today", "patients", "consult"]
+      const active = ["patients", "consult", "approve"]
         .filter((v) => doc.getElementById(`view-${v}`).dataset.active === "true");
       assert(active.length === 1 && active[0] === id,
              `after ${id}: active = ${active.join(", ") || "none"}`);
@@ -570,6 +557,34 @@ async function main() {
     assert(!bad.length, bad.join("; "));
   });
 
+  t("the document has exactly one h1", () => {
+    // There was none: the product name was a `<b>`, so a screen reader's heading
+    // outline started at h2 with no top level.
+    const h1s = doc.querySelectorAll("h1");
+    assert(h1s.length === 1, `${h1s.length} h1 elements`);
+    assert(h1s[0].textContent.trim() === "Cura", h1s[0].textContent);
+  });
+
+  t("a disabled primary button stays readable", () => {
+    // `opacity: 0.45` on white-over-accent composites to ~2.1:1, and that is the default
+    // state of "Approve and send" until the confirm box arms it.
+    assert(!/\.btn:disabled \{[^}]*opacity: 0\.4/.test(html),
+           "the disabled button is faded below legibility");
+    assert(/\.btn:disabled \{[^}]*color:/.test(html),
+           "the disabled button sets no explicit colour");
+  });
+
+  t("note headings are styled, not raw browser headings", () => {
+    // The JS emits `h4`; the CSS styled `h3`; and `h4` was outside the margin reset. So
+    // "History", "Medication" and "Plan" rendered as UA-default headings on the main
+    // screen — wrong size, wrong colour, oversized margins.
+    // Against the whole document: the wrapper adds its own <style> first, so slicing to
+    // the first one grabs the box-sizing reset and nothing else.
+    assert(/h1, h2, h3, h4 \{ margin: 0/.test(html), "h4 is outside the margin reset");
+    assert(/\.note-section h3, \.note-section h4/.test(html),
+           "note-section h4 has no styling");
+  });
+
   t("the footer says the data is synthetic", () =>
     assert(/synthetic/i.test(text("#foot")), "no synthetic-data notice"));
 
@@ -585,8 +600,8 @@ async function main() {
   await settled();
   // The signed-in state is reached asynchronously; wait for it rather than assume it.
   await until(() => live.doc.getElementById("preview-chip").hidden
-                    && /no patients yet|no appointments yet/i.test(
-                         live.doc.getElementById("view-today").textContent),
+                    && /no patients yet/i.test(
+                         live.doc.getElementById("view-patients").textContent),
               "the page to finish loading the doctor's own data");
 
   t("no script errors with a session", () =>
@@ -639,7 +654,7 @@ async function main() {
              `${p.name} is still on screen for a signed-in clinician`);
     }
     // Every hidden panel too — invisible DOM is one tab click from visible.
-    for (const id of ["today", "patients", "consult", "approve"]) {
+    for (const id of ["patients", "consult", "approve"]) {
       const panel = live.doc.getElementById(`view-${id}`).textContent;
       for (const p of DATA.patients) {
         assert(!panel.includes(p.name), `${p.name} is in the hidden ${id} panel`);
@@ -648,12 +663,10 @@ async function main() {
   });
 
   t("the signed-in clinic list is the doctor's own, and it is empty", () => {
-    live.doc.getElementById("tab-today").click();
-    const today = live.doc.getElementById("view-today").textContent;
-    assert(/no patients yet|no appointments yet/i.test(today),
-           `Today shows something other than an empty state: ${today.slice(0, 120)}`);
-    assert(!live.doc.querySelectorAll("#view-today .row-item").length,
-           "appointment rows rendered for a doctor with no appointments");
+    live.doc.getElementById("tab-patients").click();
+    const shown = live.doc.getElementById("view-patients").textContent;
+    assert(/no patients yet/i.test(shown),
+           `Patients shows something other than an empty state: ${shown.slice(0, 120)}`);
   });
 
   t("the consultation view waits for a real bot rather than replaying the demo", () => {
@@ -765,6 +778,78 @@ async function main() {
 
   typing.window.dispatchEvent(new typing.window.Event("pagehide"));
   typing.dom.window.close();
+
+  // --- provenance resolves against the right consultation -------------------
+  //
+  // This is the check that was missing. `saidById` was built from the fixture, and live
+  // utterance ids are also `u1…uN`, so citations did not miss — they collided. A real
+  // letter for one patient showed a fixture line from another patient as its evidence.
+
+  console.log("\n— provenance names this consultation's own words —");
+
+  const collide = {
+    consultation_id: "con-collide", patient_id: "PT-1", patient_name: "Rk test",
+    clinician: ME.identifier, status: "ended",
+    // Ids deliberately identical to the fixture's, with different words.
+    said: [
+      { id: "u1", who: "clinician", name: "Dr A", text: "ONLY IN THIS CONSULTATION one" },
+      { id: "u2", who: "patient", name: "Rk test", text: "ONLY IN THIS CONSULTATION two" },
+    ],
+    draft: {
+      hold_seconds: 20, drafted_by: "Cura",
+      recipient: { name: "Rk test", email: "rk@x.test", verified_against: "PT-1" },
+      letter: {
+        subject: "S", greeting: "Dear Rk,",
+        paragraphs: [{ id: "p1", text: "A claim from this call.", sources: ["u2"],
+                       kind: "clinical" },
+                     { id: "p2", text: "A claim citing a line that is gone.",
+                       sources: ["u99"], kind: "clinical" }],
+        todos: [], closing: { id: "c1", text: "See you.", sources: ["u1"],
+                              kind: "clinical" },
+        sign_off: "Dr A", footer: "F",
+      },
+    },
+  };
+
+  const prov = render({ me: ME, rooms: [collide] });
+  await settled();
+
+  await ta("a waiting draft appears without waiting for the poll", async () => {
+    // The poll runs every 3s; the first paint used to wait for it, so the screen said
+    // "Nothing waiting for approval" while a letter sat there.
+    await until(() => prov.doc.querySelector('.claim[data-block="p1"]'),
+                "the live draft to reach the approval screen", 1500);
+  });
+
+  await ta("a citation shows this consultation's line, not the fixture's", async () => {
+    prov.doc.querySelector('.claim[data-block="p1"]')
+      .dispatchEvent(new prov.window.MouseEvent("click", { bubbles: true }));
+    const shown = prov.doc.getElementById("view-approve").textContent;
+    assert(shown.includes("ONLY IN THIS CONSULTATION two"),
+           "the real line is not shown as the source");
+    // The exact failure: the fixture's u2 is Amara's line about morning readings.
+    assert(!shown.includes("morning readings are higher"),
+           "another patient's words are being shown as evidence");
+  });
+
+  t("the approval screen names the patient it is about", () => {
+    const bar = prov.doc.querySelector("#view-approve .patient-bar");
+    assert(bar, "no patient identity on the approval screen");
+    assert(bar.textContent.includes("Rk test"), "the patient is not named");
+    assert(bar.textContent.includes("rk@x.test"),
+           "where the letter goes is not shown beside who it is about");
+  });
+
+  await ta("a citation to a line that is not here says so", async () => {
+    prov.doc.querySelector('.claim[data-block="p2"]')
+      .dispatchEvent(new prov.window.MouseEvent("click", { bubbles: true }));
+    const shown = prov.doc.getElementById("view-approve").textContent;
+    assert(/not in this consultation/i.test(shown),
+           "an unresolvable citation renders as an empty panel");
+  });
+
+  prov.window.dispatchEvent(new prov.window.Event("pagehide"));
+  prov.dom.window.close();
 
   // --- the send actually sends ---------------------------------------------
   //

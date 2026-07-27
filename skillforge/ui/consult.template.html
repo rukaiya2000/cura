@@ -72,7 +72,10 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  h1, h2, h3 { margin: 0; font-weight: 600; text-wrap: balance; }
+  /* `h4` was outside this reset while the JS emitted `h4` and the CSS styled `h3`, so
+     note section headings — "History", "Medication", "Plan" — rendered as raw browser
+     headings with UA margins, on the main consultation screen. */
+  h1, h2, h3, h4 { margin: 0; font-weight: 600; text-wrap: balance; }
   p { margin: 0; }
 
   .label {
@@ -112,7 +115,7 @@
     background: var(--accent); color: var(--panel);
     font: 700 var(--step-0) var(--sans);
   }
-  .brand b { font-size: var(--step-1); }
+  .brand h1 { font-size: var(--step-1); line-height: 1.2; }
   .brand span { color: var(--ink-3); font-size: var(--step--1); }
 
   .top {
@@ -164,7 +167,7 @@
     border: 1px solid var(--accent); background: var(--accent); color: #fff;
     font: 600 var(--step-0) var(--sans); cursor: pointer;
   }
-  .add-form .btn:disabled { opacity: 0.5; cursor: progress; }
+  .add-form .btn:disabled { cursor: progress; }
 
   .preview-chip[data-tone="warn"] {
     color: var(--attention); border-color: var(--attention);
@@ -398,7 +401,14 @@
     border: 1px solid var(--accent); background: var(--accent); color: #fff;
     font: 600 var(--step-0) var(--sans); cursor: pointer;
   }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  /* `opacity: 0.45` on white-on-accent composites to ~2.1:1 — below any legibility
+     threshold, and it is the *default* state of "Approve and send" until the checkbox
+     arms it. A solid grey keeps the text readable while still reading as unavailable. */
+  .btn:disabled {
+    background: var(--rule-strong); border-color: var(--rule-strong);
+    color: #33445c; cursor: not-allowed; opacity: 1;
+  }
+  .btn.ghost:disabled { background: transparent; color: var(--ink-3); }
   .btn.ghost { background: transparent; color: var(--accent); }
   .btn.danger { background: transparent; color: var(--refused); border-color: var(--refused); }
   .btn + .btn { margin-top: 0.5rem; }
@@ -591,7 +601,7 @@
 
   .note-section { padding: 0.85rem var(--pad); border-top: 1px solid var(--rule); }
   .note-section:first-child { border-top: 0; }
-  .note-section h3 {
+  .note-section h3, .note-section h4 {
     font: 600 var(--step--1) var(--sans); letter-spacing: 0.08em;
     text-transform: uppercase; color: var(--accent); margin-bottom: 0.25rem;
   }
@@ -702,7 +712,9 @@
   <div class="brand">
     <span class="mark" aria-hidden="true">C</span>
     <div>
-      <b>Cura</b><br />
+      <!-- The product name was a `<b>`; the document had no `h1` at all, so a screen
+           reader's heading outline began at h2 with no top level. -->
+      <h1>Cura</h1>
       <span>Consultation assistant</span>
     </div>
   </div>
@@ -723,7 +735,6 @@
   </nav>
 
   <main>
-    <section class="view" id="view-today" role="tabpanel" aria-labelledby="tab-today"></section>
     <section class="view" id="view-patients" role="tabpanel" aria-labelledby="tab-patients"></section>
     <section class="view" id="view-consult" role="tabpanel" aria-labelledby="tab-consult"></section>
     <section class="view" id="view-approve" role="tabpanel" aria-labelledby="tab-approve"></section>
@@ -818,7 +829,7 @@
       renderAll();
       loadPatients();
       pollLive();
-      show(view === "approve" ? "today" : view);
+      show(view === "approve" ? "patients" : view);
 
       // An identifier that is not an email means the token carried no email claim and
       // fell back to `sub`. Sign-in still succeeds, so nothing looks wrong — but the
@@ -882,6 +893,10 @@
   let livePoll = null;
   function pollLive() {
     if (livePoll) return;
+    // Once immediately, then on the interval. Waiting for the first tick meant the app
+    // showed "Nothing waiting for approval" for three seconds after sign-in — exactly
+    // when a doctor is looking for the thing they came back to approve.
+    refreshLive();
     livePoll = setInterval(refreshLive, 3000);
   }
 
@@ -926,7 +941,9 @@
   }
 
   const TABS = [
-    { id: "today", label: "Today", count: () => SCHEDULE.length },
+    //: No "Today". `SCHEDULE` is emptied on sign-in and never repopulated, so the tab
+    //: was permanently empty for every real user — and showed the fixture's hardcoded
+    //: date while it was. A doctor opens a person, not a stage of a process.
     { id: "patients", label: "Patients", count: () => PATIENTS.length },
     { id: "consult", label: "Consultation", count: () => null },
     { id: "approve", label: "Approval",
@@ -972,7 +989,6 @@
   //: One renderer per view. A table rather than a chain of ifs so that adding a view
   //: without wiring its refresh is impossible rather than merely unlikely.
   const render = {
-    today: () => renderToday(),
     patients: () => renderPatients(),
     consult: () => renderConsult(),
     approve: () => renderApprove(),
@@ -1018,63 +1034,6 @@
   }
 
   // --- today ---------------------------------------------------------
-
-  function renderToday() {
-    const root = $("view-today");
-    root.textContent = "";
-    const head = el("div", "view-head");
-    head.append(el("h2", null, "Today"), el("span", "sub", DATA.today));
-    root.append(head);
-
-    if (!SCHEDULE.length) {
-      const empty = el("section", "card");
-      const body = el("div", "empty");
-      body.append(el("p", "prose",
-        PATIENTS.length
-          ? "No appointments yet. Open a patient and paste a meeting link to start a "
-            + "consultation."
-          : "No patients yet. Add one from the Patients tab, then paste a meeting link "
-            + "to start a consultation."));
-      empty.append(body);
-      root.append(empty);
-      return;
-    }
-
-    const card = el("section", "card");
-    const header = el("header");
-    header.append(el("h3", "label", "Clinic list"),
-                  el("span", "label", `${SCHEDULE.length} appointments`));
-    card.append(header);
-
-    const rows = el("div", "rows");
-    for (const slot of SCHEDULE) {
-      const p = byId.get(slot.patient);
-      const row = el("button", "row-item");
-      row.append(el("span", "when", slot.time));
-
-      const who = el("div", "who");
-      who.append(el("b", null, p ? p.name : slot.patient));
-      const meta = el("div", "meta");
-      meta.append(document.createTextNode(slot.reason));
-      if (slot.binding) {
-        meta.append(el("span", "sep", "·"), document.createTextNode(slot.binding));
-      }
-      who.append(meta);
-      row.append(who);
-
-      const pill = el("span", "pill", statusText(slot.status));
-      pill.dataset.kind = slot.status;
-      row.append(pill);
-
-      row.onclick = () => {
-        selected = slot.patient;
-        show(slot.status === "in_progress" ? "consult" : "patients");
-      };
-      rows.append(row);
-    }
-    card.append(rows);
-    root.append(card);
-  }
 
   // --- patients ------------------------------------------------------
 
@@ -1837,7 +1796,18 @@
   //: wrong-patient failure this whole product argues against, and showing it as a demo
   //: does not make it less alarming on a real screen.
   let draft = first("draft_ready");
-  const saidById = new Map(all("said").map((s) => [s.id, s]));
+  //: The transcript a citation is resolved against — **the room the draft belongs to**,
+  //: never the fixture.
+  //:
+  //: This was built once from the fixture's `EVENTS`. Live utterance ids are also
+  //: `u1…uN`, so lookups did not miss, they *collided*: a real letter for one patient
+  //: showed a fixture line from a different patient as its evidence. Wrong provenance is
+  //: worse than none — it survives review by looking like evidence, in the one feature
+  //: the approval gate exists for.
+  function transcriptFor(room) {
+    const lines = room && room.said && room.said.length ? room.said : (live ? [] : all("said"));
+    return new Map(lines.map((line) => [line.id, line]));
+  }
 
   //: The send state machine. `holding` is a real delay with a working cancel, because
   //: email cannot be unsent — a cancel window is the only undo that actually exists.
@@ -1856,14 +1826,44 @@
     root.textContent = "";
 
     if (!draft) {
-      root.append(el("div", "empty", "Nothing waiting for approval."));
+      // Every other view leads with a heading; this one used to be a single grey
+      // sentence on an empty panel, which reads as a page that failed to load.
+      const head = el("div", "view-head");
+      head.append(el("h2", null, "Approval"));
+      root.append(head);
+      const card = el("section", "card");
+      const body = el("div", "empty");
+      body.append(el("p", "prose",
+        "Nothing is waiting. A letter appears here once a consultation has been drafted, "
+        + "and nothing reaches a patient until you approve it."));
+      card.append(body);
+      root.append(card);
       return;
     }
 
+    const room = draftRoom();
     const head = el("div", "view-head");
     head.append(el("h2", null, "Approve before sending"),
-                el("span", "sub", `to ${draft.recipient.name} · drafted by ${draft.drafted_by}`));
+                el("span", "sub", `drafted by ${draft.drafted_by}`));
     root.append(head);
+
+    // The patient, stated once and prominently. A letter must never be reviewable
+    // without it being obvious who it is about — that is the failure this product is
+    // built around, and the approval screen is where it would cost the most.
+    const bar = el("div", "patient-bar");
+    bar.append(el("h2", null, draft.recipient.name || (room && room.patient_name) || "—"));
+    const facts = el("dl", "facts");
+    for (const [term, value] of [
+      ["Patient", (room && room.patient_id) || draft.recipient.verified_against || "—"],
+      ["Letter goes to", draft.recipient.email || "no address on record"],
+      ["From", (room && room.said ? `${room.said.length} lines captured` : "this consultation")],
+    ]) {
+      const fact = el("div", "fact");
+      fact.append(el("dt", null, term), el("dd", null, value));
+      facts.append(fact);
+    }
+    bar.append(facts);
+    root.append(bar);
 
     const cols = el("div", "cols");
     cols.append(letterCol(), reviewCol());
@@ -2021,9 +2021,13 @@
         "before sending — click the line again to edit."));
       body.append(warn);
     } else {
+      // Resolved against this draft's own consultation.
+      const saidById = transcriptFor(draftRoom());
+      let shown = 0;
       for (const id of sources) {
         const said = saidById.get(id);
         if (!said) continue;
+        shown += 1;
         const row = el("div", "prov-said");
         row.dataset.who = said.who;
         const who = el("div", "who");
@@ -2031,9 +2035,26 @@
         row.append(who, el("div", "text", `“${said.text}”`));
         body.append(row);
       }
+      if (!shown) {
+        // A citation naming a line this consultation does not contain. Saying so is the
+        // only honest option: an empty panel reads as "nothing selected", and showing
+        // some other line is how this went wrong in the first place.
+        const warn = el("div", "prov-warn");
+        warn.append(el("b", null, "That line is not in this consultation."));
+        warn.append(document.createTextNode(
+          "The claim cites part of the conversation that is not in the transcript for " +
+          "this patient. Treat it as unsupported."));
+        body.append(warn);
+      }
     }
+    body.setAttribute("aria-live", "polite");
     card.append(body);
     return card;
+  }
+
+  //: The consultation the draft on screen belongs to.
+  function draftRoom() {
+    return LIVE.find((r) => r.draft) || null;
   }
 
   function sendCard() {
@@ -2186,6 +2207,6 @@
     "clinician sent, established before the meeting exists — never inferred from the " +
     "call. Writes are confined to the patient this consultation is bound to.";
 
-  show(first("draft_ready") ? "approve" : "today");
+  show(first("draft_ready") ? "approve" : "patients");
 })();
 </script>

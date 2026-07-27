@@ -40,11 +40,29 @@ from typing import Any
 
 API_ROOT = "https://api.meetstream.ai/api/v1"
 
-#: Transcription backends MeetStream accepts. `meetstream_streaming` is their own, so it
-#: is the only one that needs no second account; the rest want their own API key.
-PROVIDERS = ("meetstream_streaming", "deepgram_streaming", "assemblyai_streaming",
-             "jigsawstack_streaming", "sarvam_streaming", "meeting_captions")
-DEFAULT_PROVIDER = "meetstream_streaming"
+#: Transcription backends, with the config each one needs.
+#:
+#: **Only `deepgram_streaming` and `assemblyai_streaming` are documented.** The others
+#: appear in MeetStream's validation error listing valid names, and `meetstream_streaming`
+#: was chosen first precisely because it looked like it needed no second account — the API
+#: accepted it, the bot joined, recording started, and it produced no transcript and no
+#: webhook at all. A provider name that validates but is not wired up fails exactly like
+#: that, so prefer a documented one.
+PROVIDER_CONFIG: dict[str, dict] = {
+    "deepgram_streaming": {"model": "nova-2", "language": "en", "punctuate": True,
+                           "transcription_mode": "sentence"},
+    "assemblyai_streaming": {"transcription_mode": "raw", "sample_rate": 16000},
+    # Reads the meeting platform's own captions. No third-party account, but the host
+    # must have captions switched on in the call.
+    "meeting_captions": {},
+    "meetstream_streaming": {},
+    "jigsawstack_streaming": {},
+    "sarvam_streaming": {},
+}
+PROVIDERS = tuple(PROVIDER_CONFIG)
+
+#: Documented and therefore supported. Needs a Deepgram key configured in MeetStream.
+DEFAULT_PROVIDER = "deepgram_streaming"
 
 #: Where our binding lives inside `custom_attributes`. Namespaced so it cannot collide
 #: with anything MeetStream or another integration puts alongside it.
@@ -203,6 +221,89 @@ def normalize_transcript(payload: dict) -> Utterance | None:
     )
 
 
+def normalize_pulled(entry: dict, binding: Binding | None = None) -> Utterance | None:
+    """One entry from a *pulled* transcript → an `Utterance`.
+
+    Separate from `normalize_transcript` because the two arrive differently: a webhook
+    streams partial turns and marks the final one, while a pulled transcript is already
+    settled — there is no `end_of_turn` to wait for, and requiring one would discard
+    every line.
+
+    The binding comes from the caller, since a pulled entry carries no
+    `custom_attributes`; the bot it was fetched for is what identifies the consultation.
+
+**The shape below is the real one**, captured from a live Google Meet:
+
+        {"participant": {"id": 100, "name": "Rukaiya Khan", "extra_data": {...}},
+         "words": [{"text": "What?",
+                    "start_timestamp": {"relative": 0.0, "absolute": "2026-…Z"},
+                    "end_timestamp":   {"relative": 5.113, "absolute": "2026-…Z"}}]}
+
+    It differs from the webhook payload in three ways that each silently produce nothing:
+    the speaker is `participant.name` rather than a `speakerName` string, the word key is
+    `text` rather than `word`, and the time is nested under `start_timestamp.absolute`.
+    Written from the documented webhook shape, this function dropped every real line.
+    """
+    if not isinstance(entry, dict):
+        return None
+
+    text = ""
+    for key in ("transcript", "text", "utterance", "content", "sentence", "new_text"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            break
+
+    words = entry.get("words")
+    if not text and isinstance(words, list):
+        text = " ".join(
+            str(w.get("text") or w.get("punctuated_word") or w.get("word") or "").strip()
+            for w in words if isinstance(w, dict)).strip()
+    if not text:
+        return None
+
+    speaker = ""
+    participant = entry.get("participant")
+    if isinstance(participant, dict):
+        speaker = str(participant.get("name") or "").strip()
+    if not speaker:
+        for key in ("speakerName", "speaker", "speaker_name", "participant", "name"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                speaker = value.strip()
+                break
+
+    at = ""
+    for key in ("timestamp", "start_time", "start", "time", "created_at"):
+        value = entry.get(key)
+        if value not in (None, ""):
+            at = str(value)
+            break
+    if not at and isinstance(words, list) and words:
+        stamp = words[0].get("start_timestamp") if isinstance(words[0], dict) else None
+        if isinstance(stamp, dict):
+            at = str(stamp.get("absolute") or stamp.get("relative") or "")
+
+    return Utterance(text=text, speaker=speaker or "Unknown",
+                     role=_role(speaker, binding), at=at,
+                     bot_id=str(entry.get("bot_id") or ""), binding=binding, final=True)
+
+
+def pulled_entries(raw) -> list[dict]:
+    """The turns inside whatever envelope the pull endpoint returns."""
+    if isinstance(raw, list):
+        return [e for e in raw if isinstance(e, dict)]
+    if isinstance(raw, dict):
+        for key in ("transcript", "transcripts", "utterances", "results", "data",
+                    "items", "segments"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                return [e for e in value if isinstance(e, dict)]
+            if isinstance(value, dict):
+                return pulled_entries(value)
+    return []
+
+
 def normalize_lifecycle(payload: dict) -> Lifecycle | None:
     """A callback webhook → one `Lifecycle`, or None if it isn't one."""
     if not isinstance(payload, dict):
@@ -298,6 +399,21 @@ class MeetStream:
         if not meeting_link:
             raise MeetStreamError("a bot needs a meeting link")
 
+        return self._request("POST", "/bots/create_bot", self.bot_payload(
+            meeting_link=meeting_link, binding=binding,
+            transcript_webhook=transcript_webhook, callback_url=callback_url,
+            bot_name=bot_name, join_at=join_at, video=video))
+
+    def bot_payload(self, *, meeting_link: str, binding: Binding,
+                    transcript_webhook: str, callback_url: str | None = None,
+                    bot_name: str = "Cura", join_at: str | None = None,
+                    video: bool = False) -> dict:
+        """The exact body `send_bot` posts.
+
+        Separate so a dry run shows what is really sent rather than a hand-built copy of
+        it. The copy in the script had drifted and was missing `recording_config` — the
+        one field that was actually in question.
+        """
         body: dict[str, Any] = {
             "meeting_link": meeting_link,
             "bot_name": bot_name,
@@ -315,15 +431,16 @@ class MeetStream:
             # platform's own captions — cheapest, but only as good as the platform's, and
             # unavailable when a host has captions switched off.
             "recording_config": {
-                "transcript": {"provider": {self.provider: {}}},
+                "transcript": {
+                    "provider": {self.provider: dict(PROVIDER_CONFIG[self.provider])},
+                },
             },
         }
         if callback_url:
             body["callback_url"] = callback_url
         if join_at:
             body["join_at"] = join_at
-
-        return self._request("POST", "/bots/create_bot", body)
+        return body
 
     def say(self, bot_id: str, message: str) -> dict:
         """Post a message into the meeting chat, as the bot.
@@ -341,9 +458,20 @@ class MeetStream:
     def stop_bot(self, bot_id: str) -> dict:
         return self._request("POST", f"/bots/{bot_id}/leave", {})
 
-    def transcript(self, bot_id: str) -> dict:
-        """The post-call transcript, for when live delivery missed something."""
+    def transcript(self, bot_id: str):
+        """The transcript MeetStream holds for this bot, fetched rather than pushed.
+
+        The webhook is the intended route and has never once fired against this account —
+        not a transcript line, not even a lifecycle event. Pulling does not depend on
+        MeetStream being able to reach us, which turns out to matter more than latency.
+        """
         return self._request("GET", f"/bots/{bot_id}/get_transcript", None)
+
+    def transcriptions(self, bot_id: str) -> list[dict]:
+        """Transcription jobs for a bot, with their status and any download URL."""
+        raw = self._request("GET", f"/bots/{bot_id}/transcriptions", None)
+        rows = raw.get("transcriptions") if isinstance(raw, dict) else raw
+        return [r for r in (rows or []) if isinstance(r, dict)]
 
     # --- plumbing ----------------------------------------------------------
 

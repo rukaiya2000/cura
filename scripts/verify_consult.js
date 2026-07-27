@@ -31,6 +31,7 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 const PAGE = path.resolve(__dirname, "..", "build", "consult.html");
 const html = fs.readFileSync(PAGE, "utf8");
 
+const SENT_TO = "amara.okafor@example.test";
 const ME = {
   identifier: "priya.rao@clinic.test",
   email: "priya.rao@clinic.test",
@@ -47,10 +48,12 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 // --- a page instance -------------------------------------------------------
 
-function render({ me }) {
+function render({ me, rooms = [], onFetch = () => {}, sendFails = "" }) {
   const errors = [];
-  const dom = new JSDOM(
-    `<!doctype html><html><head></head><body>${html}</body></html>`, {
+  // The build now emits a real document (doctype, <html lang>, <head>). Wrapping it in
+  // another one nests a document inside a body, which the parser unpicks by discarding
+  // most of it — every view came back empty.
+  const dom = new JSDOM(html, {
       runScripts: "dangerously",
       pretendToBeVisual: true,
       virtualConsole: new VirtualConsole()
@@ -65,9 +68,23 @@ function render({ me }) {
             ok: true, status: 200, json: () => Promise.resolve(body) });
           // Signed out, every endpoint is unreachable — that is what a static build is.
           if (!me) return Promise.reject(new TypeError("Failed to fetch"));
+          onFetch(path, arguments[1] || {});
           if (path.endsWith("/me")) return answer(me);
           if (path.endsWith("/patients")) return answer({ patients: [] });
-          if (path.endsWith("/live")) return answer({ consultations: [] });
+          if (path.endsWith("/live")) return answer({ consultations: rooms });
+          if (path.endsWith("/send")) {
+            // A refusal is an HTTP response, not a thrown exception — throwing from the
+            // stub escapes `fetch()` synchronously and never reaches the page's .catch,
+            // which is a fault in the test rather than a finding about the page.
+            if (sendFails) {
+              return Promise.resolve({
+                ok: false, status: 502,
+                json: () => Promise.resolve({ sent: false, reason: sendFails }),
+              });
+            }
+            return answer({ sent: true, recipient: SENT_TO,
+                            at: "2026-07-27T10:00:00" });
+          }
           return Promise.reject(new Error("not stubbed: " + path));
         };
       },
@@ -83,6 +100,16 @@ const settled = () => new Promise((r) => setTimeout(r, 120));
  * repaint — and a fixed delay that is long enough today is a flaky test tomorrow. This
  * failed exactly that way: asserting at 120ms caught the page mid-chain and reported
  * demo data that was gone 100ms later. */
+/** An async assertion, reported like `t` rather than thrown.
+ *
+ * A bare `until` that times out escapes `main` and kills the run, so the failure prints
+ * as a stack trace and every check after it never runs — which is how a mutation that
+ * removed the send request looked, at a glance, like it broke nothing. */
+async function ta(name, fn) {
+  try { await fn(); console.log(`  ok   ${name}`); }
+  catch (e) { console.log(`  FAIL ${name}\n         ${e.message}`); failures++; }
+}
+
 async function until(check, what, ms = 3000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -632,6 +659,127 @@ async function main() {
   });
 
   live.dom.window.close();
+
+  // --- typing survives the poll --------------------------------------------
+  //
+  // The 3s poll repaints every view by wiping its root. Half-typed patient details, a
+  // meeting link, an open claim editor and the caret were all destroyed on every tick,
+  // which made adding a patient and correcting a letter line effectively impossible.
+
+  console.log("\n— typing survives a repaint —");
+
+  const typing = render({ me: ME, rooms: [] });
+  await settled();
+  await until(() => typing.doc.getElementById("tab-patients"), "the app to load");
+  typing.doc.getElementById("tab-patients").click();
+  typing.doc.querySelector(".icon-btn").click();          // open the add-patient form
+
+  await ta("a half-typed patient survives a repaint", async () => {
+    const name = typing.doc.getElementById("f-name");
+    assert(name, "no name field");
+    name.value = "Amara Oka";
+    name.dispatchEvent(new typing.window.Event("input"));
+    name.focus();
+
+    // Exactly what the poll does.
+    typing.doc.getElementById("tab-patients").click();
+
+    const after = typing.doc.getElementById("f-name");
+    assert(after, "the field vanished");
+    assert(after.value === "Amara Oka",
+           `value became ${JSON.stringify(after.value)}`);
+  });
+
+  await ta("focus returns to the field being typed in", async () => {
+    const name = typing.doc.getElementById("f-name");
+    name.focus();
+    typing.doc.getElementById("tab-patients").click();
+    assert(typing.doc.activeElement && typing.doc.activeElement.id === "f-name",
+           `focus went to ${typing.doc.activeElement && typing.doc.activeElement.id}`);
+  });
+
+  typing.dom.window.close();
+
+  // --- the send actually sends ---------------------------------------------
+  //
+  // The reason this section exists: the approve button used to set a flag, count down,
+  // and render "Sent to {email}" **without contacting anything**. Every other check on
+  // this page passed while the product's most consequential action was fabricating its
+  // own confirmation. A UI test that never asserts a request cannot catch that.
+
+  console.log("\n— approving actually sends —");
+
+  const room = {
+    consultation_id: "con-test", patient_id: "PT-1", patient_name: "Amara Okafor",
+    clinician: ME.identifier, status: "ended", said: [],
+    // One second, so the cancel window can be waited out in a test.
+    draft: { ...draft, hold_seconds: 1,
+             recipient: { ...draft.recipient, email: SENT_TO } },
+  };
+  const seen = [];
+  const sending = render({ me: ME, rooms: [room], onFetch: (p) => seen.push(p) });
+  await settled();
+  await until(() => sending.doc.querySelector(".confirm input"),
+              "the approval screen to load a live draft");
+
+  const box = sending.doc.querySelector(".confirm input");
+  box.checked = true;
+  box.dispatchEvent(new sending.window.Event("change"));
+  const approveBtn = [...sending.doc.querySelectorAll(".btn")]
+    .find((b) => /Approve/.test(b.textContent));
+
+  t("nothing is sent before the button is pressed", () =>
+    assert(!seen.some((p) => p.endsWith("/send")), "a send happened unprompted"));
+
+  approveBtn.click();
+
+  t("a cancel window opens before anything leaves", () =>
+    assert(sending.doc.querySelector(".holding"), "it sent with no chance to stop it"));
+
+  await ta("approving issues a real request", async () => {
+    await until(() => seen.some((p) => p.endsWith("/send")),
+                "the send request to be made", 6000);
+    const sends = seen.filter((p) => p.endsWith("/send"));
+    assert(sends.length === 1, `${sends.length} send requests`);
+    assert(sends[0].includes("con-test"), `sent to the wrong consultation: ${sends[0]}`);
+  });
+
+  await ta("only then does it say sent", async () => {
+    await until(
+      () => /Sent to/.test(sending.doc.getElementById("view-approve").textContent),
+      "the sent confirmation");
+    assert(sending.doc.getElementById("view-approve").textContent.includes(SENT_TO),
+           "it does not name where it went");
+  });
+
+  sending.dom.window.close();
+
+  // --- and it does not claim success when the send fails --------------------
+
+  console.log("\n— a refused send is reported, not hidden —");
+
+  const failed = render({
+    me: ME, rooms: [room],
+    sendFails: "No mail connection is configured, so nothing was sent.",
+  });
+  await settled();
+  await until(() => failed.doc.querySelector(".confirm input"), "the approval screen");
+  const box2 = failed.doc.querySelector(".confirm input");
+  box2.checked = true;
+  box2.dispatchEvent(new failed.window.Event("change"));
+  [...failed.doc.querySelectorAll(".btn")].find((b) => /Approve/.test(b.textContent)).click();
+
+  await ta("a failed send never reads as sent", async () => {
+    await until(() => /did not send|refused|nothing was sent/i.test(
+                  failed.doc.getElementById("view-approve").textContent),
+                "the failure to be reported", 6000);
+    const shown = failed.doc.getElementById("view-approve").textContent;
+    assert(!/^Sent to/m.test(shown), "it claimed to have sent a letter that failed");
+    assert([...failed.doc.querySelectorAll(".btn")].some((b) => /Approve/.test(b.textContent)),
+           "the letter cannot be retried");
+  });
+
+  failed.dom.window.close();
 
   console.log(failures ? `\n${failures} failed\n` : "\nall checks passed\n");
   process.exit(failures ? 1 : 0);

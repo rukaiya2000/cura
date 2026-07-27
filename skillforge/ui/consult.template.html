@@ -586,7 +586,10 @@
 
   .lines { display: flex; flex-direction: column; gap: 0.3rem; }
   .line { display: grid; grid-template-columns: 4.4rem minmax(0, 1fr); gap: 0.7rem; }
-  .line .app {
+  /* Renamed off `.app`, which is the full-viewport application grid — every
+     integration label was inheriting `min-height: 100vh` and a 17.5rem column, so the
+     Actions card was metres tall with a screen of white between each row. */
+  .line .src {
     font: 600 0.66rem/1.6 var(--sans); letter-spacing: 0.07em;
     text-transform: uppercase; color: var(--ink-3);
   }
@@ -710,7 +713,13 @@
   const reindex = () => { byId = new Map(PATIENTS.map((p) => [p.id, p])); };
   const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:` +
                        `${String(Math.floor(s % 60)).padStart(2, "0")}`;
-  const STATUS_TEXT = { done: "Seen", in_progress: "In progress", upcoming: "Upcoming" };
+  //: Wire values are not user-facing words. The pill used to render "DISPATCHED" and
+  //: "LIVE" in caps because the lookup simply missed and fell through to the raw enum.
+  const STATUS_TEXT = {
+    done: "Seen", in_progress: "In progress", upcoming: "Upcoming",
+    dispatched: "Joining", waiting: "Waiting", live: "In progress", ended: "Finished",
+  };
+  const statusText = (s) => STATUS_TEXT[s] || "Unknown";
 
   let view = "today";
   let adding = false;                 // the + form is open
@@ -916,8 +925,17 @@
   //: the underlying data changes — signing in replaces the fixture wholesale — repainting
   //: just the active panel leaves the others holding the old patients. They are invisible
   //: but present, and one tab click brings them back.
+  //: Every repaint goes through here, so focus and caret are preserved once rather than
+  //: at each call site — `show` used to bypass the bracket and lose the caret on a tab
+  //: click even though the value survived.
+  function repaint(fn) {
+    rememberFocus();
+    fn();
+    restoreFocus();
+  }
+
   function renderAll() {
-    for (const paint of Object.values(render)) paint();
+    repaint(() => { for (const paint of Object.values(render)) paint(); });
   }
 
   function show(next) {
@@ -925,13 +943,15 @@
     for (const tab of TABS) {
       $(`view-${tab.id}`).dataset.active = String(view === tab.id);
     }
-    renderNav();
-    renderSlots();
-    // Every view re-renders on show, not just some. Today and Consultation used to be
-    // built once at startup and never again, so they kept the demo fixture on screen
-    // after signing in cleared it — the nav said 0 appointments while the panel beside
-    // it still listed five. A view that renders once is a view that goes stale.
-    render[view] && render[view]();
+    repaint(() => {
+      renderNav();
+      renderSlots();
+      // Every view re-renders on show, not just some. Today and Consultation used to be
+      // built once at startup and never again, so they kept the demo fixture on screen
+      // after signing in cleared it — the nav said 0 appointments while the panel beside
+      // it still listed five. A view that renders once is a view that goes stale.
+      render[view] && render[view]();
+    });
     // Setting scrollTop rather than calling window.scrollTo: same effect, and it works in
     // embedding contexts that stub the scroll APIs out.
     document.documentElement.scrollTop = 0;
@@ -982,7 +1002,7 @@
       who.append(meta);
       row.append(who);
 
-      const pill = el("span", "pill", STATUS_TEXT[slot.status] || slot.status);
+      const pill = el("span", "pill", statusText(slot.status));
       pill.dataset.kind = slot.status;
       row.append(pill);
 
@@ -1062,9 +1082,13 @@
     if (adding) card.append(addPatientForm());
 
     if (!PATIENTS.length) {
-      card.append(el("div", "empty",
-        "No patients yet. Use + to add the first one — the record fills itself in " +
-        "from your consultations."));
+      // `patientsFailed` used to be set and never read, so a 500 and a brand-new account
+      // rendered the identical sentence: your patients are not gone, they are unreachable.
+      card.append(el("div", "empty", patientsFailed
+        ? "Could not reach the server, so your patient list could not be loaded. "
+          + "Nothing has been lost — reload when it is back."
+        : "No patients yet. Use + to add the first one — the record fills itself in "
+          + "from your consultations."));
       return card;
     }
 
@@ -1098,16 +1122,61 @@
     return card;
   }
 
+  //: Every text field's value lives here, not only in the DOM.
+  //:
+  //: The 3s poll repaints whole views, so an input's value was wiped mid-keystroke and
+  //: adding a patient was effectively impossible. Keeping the value in state means a
+  //: repaint restores it instead of destroying it — and `restoreFocus` puts the caret
+  //: back where it was.
+  const forms = {};
+
   function field(label, key, opts = {}) {
     const wrap = el("label", "field");
-    wrap.append(el("span", "label", label));
+    const id = `f-${key}`;
+    const span = el("span", "field-label", label);
+    span.id = `${id}-label`;
+    wrap.append(span);
+
     const input = el("input");
     input.type = opts.type || "text";
     input.name = key;
+    input.id = id;
     input.placeholder = opts.placeholder || "";
-    if (opts.required) input.required = true;
+    if (opts.required) {
+      input.required = true;
+      span.append(el("span", "req", " required"));
+    }
+    input.value = forms[key] || "";
+    input.oninput = () => { forms[key] = input.value; };
     wrap.append(input);
     return wrap;
+  }
+
+  //: Which field had focus, and where the caret was, so a repaint can put it back.
+  let focusKey = null;
+  let caret = 0;
+
+  function rememberFocus() {
+    const active = document.activeElement;
+    if (active && active.id && active.id.startsWith("f-")) {
+      focusKey = active.id;
+      caret = active.selectionStart ?? active.value.length;
+    } else if (active && active.tagName === "TEXTAREA") {
+      focusKey = "editor";
+      caret = active.selectionStart ?? 0;
+    } else {
+      focusKey = null;
+    }
+  }
+
+  function restoreFocus() {
+    if (!focusKey) return;
+    const node = focusKey === "editor"
+      ? document.querySelector(".claim textarea")
+      : document.getElementById(focusKey);
+    if (!node) return;
+    node.focus();
+    try { node.setSelectionRange(caret, caret); } catch { /* not a text input */ }
   }
 
   function addPatientForm() {
@@ -1285,10 +1354,13 @@
     }
     const p = bound.patient;
 
+    // `inProgress` is a function; it used to be referenced as a value here, so the
+    // subtitle rendered the literal string "undefined · undefined" on the demo path.
+    const slot = inProgress();
     const head = el("div", "view-head");
     head.append(el("h2", null, "Consultation"),
-                el("span", "sub", `${inProgress ? inProgress.time + " · " : ""}` +
-                                  `${inProgress ? inProgress.reason : ""}`));
+                el("span", "sub", [slot && slot.time, slot && slot.reason]
+                                    .filter(Boolean).join(" · ")));
     root.append(head);
 
     // Sticky identity — see the CSS note on wrong-patient harm.
@@ -1398,7 +1470,7 @@
         const lines = el("div", "lines");
         for (const o of a.observed) {
           const line = el("div", "line");
-          line.append(el("span", "app", o.app));
+          line.append(el("span", "src", o.app));
           const bodyEl = el("div");
           bodyEl.append(el("div", "what", o.what));
           if (o.detail) bodyEl.append(el("div", "detail", o.detail));
@@ -1465,7 +1537,7 @@
       const card = el("section", "card");
       const header = el("header");
       header.append(el("h3", "label", room.patient_name || room.patient_id));
-      const pill = el("span", "pill", STATUS_TEXT[room.status] || room.status);
+      const pill = el("span", "pill", statusText(room.status));
       pill.dataset.kind = room.status === "live" ? "in_progress"
                         : room.status === "ended" ? "done" : "upcoming";
       header.append(pill);
@@ -1553,7 +1625,8 @@
   //: The send state machine. `holding` is a real delay with a working cancel, because
   //: email cannot be unsent — a cancel window is the only undo that actually exists.
   const send = { state: "draft", selected: null, edits: new Map(), confirmed: false,
-                 remaining: 0, timer: null };
+                 remaining: 0, timer: null, error: "", sentTo: "", sentAt: "",
+                 editing: null, editing_text: null };
 
   const blocks = () => draft
     ? [...draft.letter.paragraphs, ...draft.letter.todos, draft.letter.closing]
@@ -1613,18 +1686,33 @@
 
     if (send.editing === block.id) {
       const area = el("textarea");
-      area.value = textOf(block);
-      area.setAttribute("aria-label", "Edit this line");
+      // The *in-progress* text, not the committed text. A repaint used to rebuild this
+      // from `textOf(block)`, so every keystroke since the last blur was discarded every
+      // three seconds — and editing a letter line is the evidence a clinician read it.
+      area.value = send.editing_text ?? textOf(block);
+      area.setAttribute("aria-label", `Edit: ${block.text.slice(0, 60)}`);
       area.onclick = (e) => e.stopPropagation();
-      area.onblur = () => {
-        const next = area.value.trim();
+      area.oninput = () => { send.editing_text = area.value; };
+      const commit = () => {
+        const next = (send.editing_text ?? area.value).trim();
         if (next && next !== block.text) send.edits.set(block.id, next);
         else send.edits.delete(block.id);
         send.editing = null;
+        send.editing_text = null;
         renderApprove();
       };
+      area.onblur = commit;
+      area.onkeydown = (e) => {
+        if (e.key === "Escape") {          // abandon, rather than commit by accident
+          e.preventDefault();
+          send.editing = null;
+          send.editing_text = null;
+          renderApprove();
+        }
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
+      };
       b.append(area);
-      setTimeout(() => area.focus(), 0);
+      if (focusKey !== "editor") setTimeout(() => area.focus(), 0);
       return b;
     }
 
@@ -1739,10 +1827,21 @@
     const flagged = blocks().filter(unsourced).length;
     const edited = send.edits.size;
 
+    if (send.state === "sending") {
+      const wait = el("div", "holding");
+      wait.append(el("span", "label", "Sending…"));
+      wait.setAttribute("aria-live", "polite");
+      body.append(wait);
+      card.append(body);
+      return card;
+    }
+
     if (send.state === "sent") {
       const mark = el("div", "sent-mark");
+      mark.setAttribute("aria-live", "polite");
       const t = el("div");
-      t.append(el("b", null, `Sent to ${draft.recipient.email}`));
+      // The address the *server* confirmed, not the one the screen was holding.
+      t.append(el("b", null, `Sent to ${send.sentTo || draft.recipient.email}`));
       t.append(el("span", "detail",
         `Approved by ${DATA.clinician.name}` +
         (edited ? ` · ${edited} line${edited > 1 ? "s" : ""} edited first` : "")));
@@ -1801,19 +1900,51 @@
     const go = el("button", "btn", `Approve and send to ${draft.recipient.name}`);
     go.disabled = !send.confirmed;
     go.onclick = () => {
+      // The hold is a real cancel window, and then the letter is *actually sent*.
+      //
+      // This used to flip a flag, count down, and render "Sent to {email}" without
+      // contacting anything — a fabricated confirmation on the one action the whole
+      // product exists to gate. "Sent" is now only ever shown after the server says so.
       send.state = "holding";
       send.remaining = draft.hold_seconds;
+      send.error = "";
       send.timer = setInterval(() => {
         send.remaining -= 1;
-        if (send.remaining <= 0) {
-          clearInterval(send.timer);
-          send.state = "sent";
-        }
-        if (view === "approve") renderApprove();
+        if (send.remaining > 0) return renderApprove();
+        clearInterval(send.timer);
+        send.state = "sending";
+        renderApprove();
+
+        const room = LIVE.find((r) => r.draft);
+        fetch(`/consultation/${room ? room.consultation_id : ""}/send`, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ edits: Object.fromEntries(send.edits) }),
+        })
+          .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+          .then(({ ok, d }) => {
+            if (!ok || !d.sent) throw new Error(d.reason || d.error || "It did not send.");
+            send.state = "sent";
+            send.sentTo = d.recipient;
+            send.sentAt = d.at;
+            renderApprove();
+          })
+          .catch((e) => {
+            // Back to a draft that can be sent again. Never "sent".
+            send.state = "draft";
+            send.error = live ? e.message
+              : "No server behind this page — nothing was sent.";
+            renderApprove();
+          });
       }, 1000);
       renderApprove();
     };
     body.append(go);
+    if (send.error) {
+      const failed = el("p", "form-error", send.error);
+      failed.setAttribute("role", "alert");
+      body.append(failed);
+    }
 
     body.append(el("p", "gate-note",
       "Nothing is sent automatically. The bot drafts; a clinician approves; only then " +

@@ -23,9 +23,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import json
+
 from skillforge.adapters.meetstream import Binding, MeetStream, MeetStreamError
 from skillforge.config import get, load_env
-from skillforge.ui.consult import CLINICIAN, PATIENTS
+from skillforge.ui.serve import consultation_id
 
 DIM, B, GREEN, AMBER, RED, OFF = (
     "\033[2m", "\033[1m", "\033[32m", "\033[38;5;179m", "\033[31m", "\033[0m",
@@ -35,33 +37,46 @@ DIM, B, GREEN, AMBER, RED, OFF = (
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--meeting", help="Google Meet, Zoom or Teams link")
-    ap.add_argument("--patient", default="PT-10482", help="patient id from the practice")
+    ap.add_argument("--patient", default=None,
+                    help="patient id; omit to use your first patient")
     ap.add_argument("--public", help="public base URL MeetStream can reach (ngrok)")
     ap.add_argument("--join-at", help="ISO 8601; schedule instead of joining now")
     # Read from the environment rather than hardcoded, so the name participants see is
     # configured in one place rather than living as a default in a script.
     ap.add_argument("--name", default=None, help="the bot's display name in the call")
+    ap.add_argument("--provider", default=None,
+                    help="transcription backend: deepgram_streaming (documented, needs a "
+                         "Deepgram key in MeetStream), assemblyai_streaming, or "
+                         "meeting_captions (no key, but the host must enable captions)")
     ap.add_argument("--dry-run", action="store_true", help="print the payload, send nothing")
     args = ap.parse_args()
     load_env()
     bot_name = args.name or get("MEETSTREAM_BOT_NAME") or "Cura"
 
-    patient = next((p for p in PATIENTS if p["id"] == args.patient), None)
+    # The doctor's own patients, not the demo fixture — this script used to read the
+    # fixture, so it could only ever dispatch a bot for someone who does not exist.
+    identifier = get("SKILLFORGE_IDENTIFIER_FULL") or ""
+    store = ROOT / "data" / "patients.json"
+    everyone = json.loads(store.read_text()) if store.is_file() else {}
+    mine = everyone.get(identifier, [])
+    patient = next((p for p in mine if p["id"] == args.patient), None) if args.patient \
+        else (mine[0] if mine else None)
+
     if patient is None:
-        print(f"{RED}no patient {args.patient}{OFF} — one of: "
-              f"{', '.join(p['id'] for p in PATIENTS)}")
+        print(f"{RED}no patient {args.patient or ''}{OFF} for {identifier}. Available:")
+        for p in mine:
+            print(f"    {p['id']}  {p['name']}")
+        if not mine:
+            print(f"    {DIM}(none — add one in the app first){OFF}")
         return 1
 
-    identifier = get("SKILLFORGE_IDENTIFIER_FULL") or ""
     binding = Binding(
-        # A real consultation id would come from the appointment. Derived here so a
-        # re-run for the same patient lands in the same room rather than a new one.
-        consultation_id=f"con-{patient['id'].lower()}",
+        consultation_id=consultation_id(identifier, patient["id"]),
         patient_id=patient["id"],
         patient_name=patient["name"],
         clinician=identifier,
-        clinician_name=CLINICIAN["name"],
-        crm_id=patient["crm_id"],
+        clinician_name=get("SKILLFORGE_CLINICIAN_NAME") or "",
+        crm_id=patient.get("crm_id"),
     )
 
     print(f"\n{B}Bot briefing{OFF}")
@@ -72,12 +87,22 @@ def main() -> int:
     print(f"  {DIM}This is fixed now. Every transcript line comes back carrying it, so "
           f"nothing\n  downstream has to work out whose consultation it is.{OFF}")
 
+    # `--public` is optional. It only exists so MeetStream can push webhooks, and against
+    # this account they have never fired once — not a transcript line, not a lifecycle
+    # event, across every bot dispatched. The working route is to pull:
+    #
+    #     scripts/pull_transcript.py --bot <id> --watch
+    #
+    # which fetches from MeetStream and posts to this machine directly, so it needs no
+    # tunnel, no public address, and nothing of MeetStream's to be reachable inbound.
     if not args.public and not args.dry_run:
-        print(f"\n  {RED}--public is required{OFF} — MeetStream cannot POST to 127.0.0.1.")
-        print(f"  {DIM}Run `ngrok http 8770` and pass the https URL it prints.{OFF}\n")
-        return 1
+        print(f"\n  {AMBER}no --public{OFF} — webhooks cannot reach this machine, so the "
+              f"bot will\n  record and deliver nothing by itself. Pull instead once it "
+              f"has joined:")
+        print(f"    {DIM}.venv/bin/python scripts/pull_transcript.py --bot <id> "
+              f"--watch{OFF}\n")
 
-    base = (args.public or "https://example.invalid").rstrip("/")
+    base = (args.public or "https://webhooks.unreachable.invalid").rstrip("/")
     transcript_hook = f"{base}/hooks/transcript"
     lifecycle_hook = f"{base}/hooks/bot"
 
@@ -87,16 +112,12 @@ def main() -> int:
               f"same value in MeetStream.")
 
     if args.dry_run:
-        payload = {
-            "meeting_link": args.meeting or "<meeting link>",
-            "bot_name": bot_name,
-            "video_required": False,
-            "custom_attributes": binding.to_attributes(),
-            "live_transcription_required": {"webhook_url": transcript_hook},
-            "callback_url": lifecycle_hook,
-        }
-        if args.join_at:
-            payload["join_at"] = args.join_at
+        # The adapter's own payload, not a copy of it.
+        payload = MeetStream(api_key="dry-run",
+                             provider=args.provider or "").bot_payload(
+            meeting_link=args.meeting or "<meeting link>", binding=binding,
+            transcript_webhook=transcript_hook, callback_url=lifecycle_hook,
+            bot_name=bot_name, join_at=args.join_at)
         print(f"\n{B}POST /api/v1/bots/create_bot{OFF}  {DIM}(dry run — nothing sent){OFF}")
         print(json.dumps(payload, indent=2))
         return 0
@@ -106,7 +127,7 @@ def main() -> int:
         return 1
 
     try:
-        result = MeetStream().send_bot(
+        result = MeetStream(provider=args.provider or '').send_bot(
             meeting_link=args.meeting, binding=binding,
             transcript_webhook=transcript_hook, callback_url=lifecycle_hook,
             bot_name=bot_name, join_at=args.join_at,

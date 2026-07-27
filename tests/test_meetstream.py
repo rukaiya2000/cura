@@ -343,7 +343,10 @@ def test_a_transcription_provider_is_always_sent():
 
     provider = sent["body"]["recording_config"]["transcript"]["provider"]
     assert provider, "no streaming provider in the payload"
-    assert "meetstream_streaming" in provider
+    # A *documented* provider. `meetstream_streaming` validates and then transcribes
+    # nothing — the bot joined, recording started, and no webhook ever fired.
+    assert "deepgram_streaming" in provider
+    assert provider["deepgram_streaming"], "the provider needs its own config, not {}"
 
 
 def test_the_provider_is_configurable():
@@ -359,3 +362,151 @@ def test_an_unknown_provider_is_refused_before_any_call():
     rather than costing a round trip and a confusing 400."""
     with pytest.raises(MeetStreamError, match="unknown transcription provider"):
         MeetStream(api_key="k", provider="whisper_but_made_up")
+
+
+def test_each_provider_carries_the_config_it_needs():
+    """An empty provider object is accepted and then behaves unpredictably. Deepgram wants
+    a model; AssemblyAI wants a sample rate."""
+    from skillforge.adapters.meetstream import PROVIDER_CONFIG
+
+    assert PROVIDER_CONFIG["deepgram_streaming"]["model"] == "nova-2"
+    assert PROVIDER_CONFIG["assemblyai_streaming"]["sample_rate"] == 16000
+    # meeting_captions genuinely takes none — it reads the platform's own captions.
+    assert PROVIDER_CONFIG["meeting_captions"] == {}
+
+
+def test_the_default_is_a_documented_provider():
+    """Only deepgram and assemblyai are in MeetStream's docs. The rest appear in a
+    validation error listing valid names, which is not the same as being wired up."""
+    from skillforge.adapters.meetstream import DEFAULT_PROVIDER
+
+    assert DEFAULT_PROVIDER in ("deepgram_streaming", "assemblyai_streaming")
+
+
+def test_the_dry_run_payload_is_the_one_that_gets_sent():
+    """A hand-built copy for display drifts from the real body — the copy in send_bot.py
+    had lost `recording_config`, which was the field under investigation at the time."""
+    ms, sent = client_recording()
+    shown = ms.bot_payload(meeting_link="https://meet.google.com/x", binding=BINDING,
+                           transcript_webhook="https://x.test/h")
+    ms.send_bot(meeting_link="https://meet.google.com/x", binding=BINDING,
+                transcript_webhook="https://x.test/h")
+
+    assert shown == sent["body"]
+    assert "recording_config" in shown
+
+
+# --- pulling, because the webhook never fires --------------------------------
+
+
+def test_a_pulled_line_needs_no_end_of_turn():
+    """A pulled transcript is already settled — there is no partial turn to wait for, and
+    requiring `end_of_turn` would discard every line."""
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    u = normalize_pulled({"speakerName": "Amara Okafor",
+                          "transcript": "The morning readings are higher.",
+                          "timestamp": "2026-07-25T09:20:30"}, BINDING)
+    assert u.text == "The morning readings are higher."
+    assert u.role == "patient"
+    assert u.binding.patient_id == "PT-10482"
+
+
+def test_the_binding_comes_from_the_caller_not_the_entry():
+    """A pulled entry carries no custom_attributes — the bot it was fetched for is what
+    identifies the consultation."""
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    u = normalize_pulled({"text": "Anything.", "speaker": "Dr Priya Rao"}, BINDING)
+    assert u.binding.consultation_id == "con-0912"
+    assert u.role == "clinician"
+
+
+@pytest.mark.parametrize("entry, expected", [
+    ({"transcript": "one"}, "one"),
+    ({"text": "two"}, "two"),
+    ({"sentence": "three"}, "three"),
+    ({"words": [{"punctuated_word": "four,"}, {"word": "five"}]}, "four, five"),
+])
+def test_the_text_is_found_whichever_field_carries_it(entry, expected):
+    """The pull endpoint has only ever returned []. These field names come from the
+    documented webhook payload and the shapes around it — unverified, and isolated here
+    so a wrong guess is one function."""
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    assert normalize_pulled(entry, BINDING).text == expected
+
+
+@pytest.mark.parametrize("raw, count", [
+    ([{"text": "a"}, {"text": "b"}], 2),
+    ({"transcript": [{"text": "a"}]}, 1),
+    ({"data": {"utterances": [{"text": "a"}, {"text": "b"}]}}, 2),
+    ({}, 0),
+    ([], 0),
+    (None, 0),
+])
+def test_envelopes_are_unwrapped(raw, count):
+    from skillforge.adapters.meetstream import pulled_entries
+
+    assert len(pulled_entries(raw)) == count
+
+
+@pytest.mark.parametrize("junk", [None, "", 0, [], {"nothing": "useful"}])
+def test_an_unusable_entry_is_dropped(junk):
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    assert normalize_pulled(junk, BINDING) is None
+
+
+#: Captured verbatim from a live Google Meet on 2026-07-25. Not invented, not adapted
+#: from the docs — the pull endpoint's actual output. A fixture I wrote myself would have
+#: agreed with a parser I wrote myself and proved nothing, which is exactly what happened:
+#: the parser built from the documented webhook shape dropped every real line.
+LIVE_PULLED = {
+    "participant": {
+        "id": 100, "name": "Rukaiya Khan",
+        "extra_data": {"google_meet": {
+            "static_participant_id": "spaces/NTwZoOC1y4YB/devices/232"}},
+    },
+    "words": [{
+        "text": "What?",
+        "start_timestamp": {"relative": 0.0, "absolute": "2026-07-25T23:52:49.499000Z"},
+        "end_timestamp": {"relative": 5.113, "absolute": "2026-07-25T23:52:54.612000Z"},
+    }],
+}
+
+
+def test_the_real_pulled_shape_parses():
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    u = normalize_pulled(LIVE_PULLED, BINDING)
+    assert u is not None, "the real shape was dropped entirely"
+    assert u.text == "What?"
+    assert u.speaker == "Rukaiya Khan"
+    assert u.at == "2026-07-25T23:52:49.499000Z"
+
+
+def test_the_speaker_comes_from_the_participant_object():
+    """`participant` is an object, not a `speakerName` string. Reading it as a string
+    left every line attributed to "Unknown"."""
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    assert normalize_pulled(LIVE_PULLED, BINDING).speaker == "Rukaiya Khan"
+
+
+def test_multiple_words_join_into_a_sentence():
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    entry = {**LIVE_PULLED, "words": [
+        {"text": "The"}, {"text": "morning"}, {"text": "readings"}, {"text": "are"},
+        {"text": "higher."}]}
+    assert normalize_pulled(entry, BINDING).text == "The morning readings are higher."
+
+
+def test_the_word_key_is_text_not_word():
+    """MeetStream's webhook payload uses `word`; the pull endpoint uses `text`. Handling
+    only the documented one produced empty lines that were then silently dropped."""
+    from skillforge.adapters.meetstream import normalize_pulled
+
+    assert normalize_pulled({"participant": {"name": "A"},
+                             "words": [{"text": "yes"}]}, BINDING).text == "yes"

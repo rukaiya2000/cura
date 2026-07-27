@@ -14,6 +14,35 @@ sys.path.insert(0, str(ROOT))
 
 from skillforge.ui import consult
 
+#: The document these templates are wrapped in.
+#:
+#: They were served as bare fragments starting at `<title>`, which has three consequences
+#: nobody would choose. Without a doctype the browser renders in **quirks mode**, where
+#: the legacy width model applies — the only reason full-width padded buttons were not
+#: overflowing. Without a viewport meta, every `max-width` media query in both files
+#: **never fires on a phone**, so the responsive design was dead on the devices it was
+#: written for. And without `lang`, a screen reader guesses at the pronunciation of a
+#: clinical document.
+#:
+#: `box-sizing: border-box` is set here rather than per-template so the two pages cannot
+#: disagree about it — one of them already did.
+DOC_OPEN = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>*, *::before, *::after { box-sizing: border-box; }</style>
+"""
+DOC_MID = "</head>\n<body>\n"
+DOC_CLOSE = "\n</body>\n</html>\n"
+
+
+def wrap(fragment: str) -> str:
+    """Put a fragment in a real document, with <title> and <style> hoisted into <head>."""
+    head, _, rest = fragment.partition("\n")          # the <title> line
+    return DOC_OPEN + head + "\n" + DOC_MID + rest + DOC_CLOSE
+
+
 TEMPLATE = ROOT / "skillforge" / "ui" / "consult.template.html"
 OUT = ROOT / "build" / "consult.html"
 TOKEN = "__CONSULTATION_JSON__"
@@ -34,9 +63,9 @@ def main() -> int:
     # `<` escaped so the JSON can never close the surrounding script element.
     payload = consult.to_json().replace("<", "\\u003c")
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(template.replace(TOKEN, payload))
+    OUT.write_text(wrap(template.replace(TOKEN, payload)))
 
-    SIGNIN_OUT.write_text(SIGNIN_TEMPLATE.read_text())
+    SIGNIN_OUT.write_text(wrap(SIGNIN_TEMPLATE.read_text()))
 
     data = consult.practice()
     print(f"wrote {OUT.relative_to(ROOT)}  ({OUT.stat().st_size / 1024:.1f} KB)")

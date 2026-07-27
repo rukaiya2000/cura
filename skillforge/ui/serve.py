@@ -22,6 +22,7 @@ Demo-grade, deliberately and only where it costs nothing that matters:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -164,20 +165,30 @@ class PatientStore:
         return next((p for p in self.rows.get(clinician, ())
                      if p["id"] == patient_id), None)
 
-    #: Fields a clinician may edit directly. Everything else about a patient is derived
-    #: from consultations, and a form that let you type it would be a form that lets you
-    #: disagree with the record.
-    EDITABLE = ("conditions", "medications", "allergies", "phone")
+    #: Fields a clinician may edit directly.
+    #:
+    #: `email` is here because it decides where a medical summary is delivered, and until
+    #: this route existed a typo in it was permanent. `id`, `crm_id`, `notes` and
+    #: `consultations` are deliberately absent: those are written by what happened, and a
+    #: form that let you type them would be a form that lets you disagree with the record.
+    EDITABLE = ("name", "dob", "email", "nhs", "phone",
+                "conditions", "medications", "allergies")
 
     def update(self, clinician: str, patient_id: str, changes: dict) -> dict | None:
         patient = self.get(clinician, patient_id)
         if patient is None:
             return None
         for key in self.EDITABLE:
-            if key in changes:
-                value = changes[key]
-                patient[key] = ([v.strip() for v in value if str(v).strip()]
-                                if isinstance(value, list) else str(value).strip())
+            if key not in changes:
+                continue
+            value = changes[key]
+            if isinstance(value, list):
+                patient[key] = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                text = str(value).strip()
+                # Lowercased like `add` does, or the same address is stored two ways and
+                # the two never compare equal.
+                patient[key] = text.lower() if key == "email" else text
         self._save()
         return patient
 
@@ -320,14 +331,67 @@ class LiveConsultations:
     def get(self, consultation_id: str) -> dict | None:
         return self.rooms.get(consultation_id)
 
-    def for_clinician(self, identifier: str) -> list[dict]:
+    def for_clinician(self, identifier: str,
+                      aliases: list[str] | None = None) -> list[dict]:
         """Only this doctor's consultations.
 
         The binding names the clinician the bot acts under, so this is a filter rather
         than a permission check — but it is the filter that stops one doctor's live
         transcript appearing on another's screen.
+
+        Aliases are accepted for the same reason the patient list takes them: a doctor's
+        identifier changes when profile resolution starts working, and consultations
+        recorded under the old one would otherwise vanish.
         """
-        return [r for r in self.rooms.values() if r["clinician"] == identifier]
+        keys = set(aliases or [identifier])
+        return [r for r in self.rooms.values() if r["clinician"] in keys]
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _mail_connection() -> str:
+    """The connection name that can send mail, or "" if none is configured.
+
+    Matched by prefix rather than hardcoded, because connection names carry generated
+    suffixes — `gmail-OUvrEYk9` — and a hardcoded "gmail" silently matches nothing.
+    """
+    listed = [n.strip() for n in os.environ.get("SKILLFORGE_CONNECTIONS", "").split(",")
+              if n.strip()]
+    return next((n for n in listed if n.split("-")[0] in ("gmail", "outlook", "mail")), "")
+
+
+def _letter_text(draft: dict, edits: dict) -> str:
+    """The letter as the patient will read it, with the clinician's edits applied.
+
+    Assembled here rather than in the browser so what is sent is what the server holds —
+    a body composed client-side could differ from the draft that was reviewed, and
+    nothing would notice.
+    """
+    letter = draft.get("letter") or {}
+    text = lambda b: edits.get(b.get("id"), b.get("text", ""))   # noqa: E731
+    parts = [letter.get("greeting", "")]
+    parts += [text(b) for b in letter.get("paragraphs", [])]
+    todos = [text(b) for b in letter.get("todos", [])]
+    if todos:
+        parts.append("Before your next visit:")
+        parts += [f"  - {t}" for t in todos]
+    if letter.get("closing"):
+        parts.append(text(letter["closing"]))
+    parts += [letter.get("sign_off", ""), "", letter.get("footer", "")]
+    return "\n\n".join(p for p in parts if p)
+
+
+def consultation_id(clinician: str, patient_id: str) -> str:
+    """A consultation key that cannot collide across clinicians.
+
+    Hashed rather than concatenated so the id stays short and carries no email address —
+    it travels to MeetStream in `custom_attributes` and comes back on every webhook, and
+    a third party does not need the doctor's address to route a transcript.
+    """
+    digest = hashlib.sha256(clinician.encode()).hexdigest()[:8]
+    return f"con-{patient_id.lower()}-{digest}"
 
 
 def _safe_path(root: Path, url_path: str) -> Path | None:
@@ -457,8 +521,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/live":
             if session is None:
                 return self._json({"consultations": []}, 401)
-            return self._json(
-                {"consultations": self.consultations.for_clinician(session.identifier)})
+            rooms = self.consultations.for_clinician(
+                session.identifier, aliases=session.aliases)
+            wanted = (query.get("patient") or [None])[0]
+            if wanted:
+                rooms = [r for r in rooms if r["patient_id"] == wanted]
+            return self._json({"consultations": rooms})
 
         if session is None and route not in self.public_paths:
             return self._redirect(SIGNIN_ROUTE)
@@ -489,6 +557,10 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith(DRAFT_PREFIX) and route.endswith("/draft"):
             return self.draft_consultation(
                 route[len(DRAFT_PREFIX):-len("/draft")])
+        if route.startswith(DRAFT_PREFIX) and route.endswith("/send"):
+            return self.send_letter(route[len(DRAFT_PREFIX):-len("/send")])
+        if route.startswith(PATIENTS_ROUTE + "/"):
+            return self.update_patient(route[len(PATIENTS_ROUTE) + 1:])
 
         if route not in (TRANSCRIPT_HOOK, LIFECYCLE_HOOK):
             return self._text("Not found", 404)
@@ -588,6 +660,121 @@ class Handler(BaseHTTPRequestHandler):
                            "unsupported": len(draft.unsupported),
                            "invented_citations": draft.invented_citations})
 
+    def send_letter(self, consultation_id: str):
+        """Send the approved letter to the patient — or say plainly why it did not go.
+
+        This route exists because the screen used to claim the letter had been sent
+        without contacting anything at all: the button set a client-side flag, counted
+        down, and rendered "Sent to {email}". A fabricated confirmation is worse than a
+        failure, and worst of all on the one action the whole product gates.
+
+        The rule here is that "sent" is only ever reported after something accepted it.
+        """
+        session = self.store.get(self._sid())
+        if session is None:
+            return self._json({"error": "Sign in first."}, 401)
+
+        room = self.consultations.get(consultation_id)
+        if room is None:
+            return self._json({"error": "No such consultation."}, 404)
+        if room["clinician"] not in set(session.aliases):
+            return self._json({"error": "That is not your consultation."}, 403)
+
+        draft = room.get("draft")
+        if not draft:
+            return self._json({"error": "There is no draft to send."}, 400)
+        if room.get("sent_at"):
+            return self._json({"error": "This letter has already been sent."}, 409)
+
+        length = min(int(self.headers.get("Content-Length") or 0), MAX_HOOK_BYTES)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            body = {}
+
+        recipient = (draft.get("recipient") or {}).get("email", "")
+        if not recipient:
+            return self._json({"error":
+                "This patient has no email address on their record, so there is nowhere "
+                "to send it. Add one and try again."}, 400)
+
+        # Edits the clinician made are what gets sent — not the model's original. Both
+        # are kept: the diff is the evidence the letter was read.
+        edits = body.get("edits") if isinstance(body.get("edits"), dict) else {}
+        text = _letter_text(draft, edits)
+
+        try:
+            outcome = self._deliver(session, recipient, draft, text)
+        except Exception as e:  # noqa: BLE001 — report, never pretend
+            return self._json({"error": f"{type(e).__name__}: {e}"}, 502)
+
+        if not outcome["sent"]:
+            # A real, honest failure. The letter stays a draft and can be sent again.
+            return self._json({"sent": False, "reason": outcome["reason"],
+                               "recipient": recipient}, 502)
+
+        room["sent_at"] = outcome["at"]
+        room["sent_to"] = recipient
+        room["sent_body"] = text
+        room["edits"] = edits
+        self.consultations._save()
+        return self._json({"sent": True, "recipient": recipient, "at": outcome["at"],
+                           "edited": len(edits)})
+
+    def _deliver(self, session, recipient: str, draft: dict, text: str) -> dict:
+        """Hand the letter to the clinician's own mail connection.
+
+        Returns rather than raises on "no connection", because that is the expected state
+        of a deployment whose Gmail authorisation is incomplete — and the doctor needs to
+        be told the letter is still sitting there, not shown a stack trace.
+        """
+        from ..adapters.scalekit_client import ScalekitActions, ScalekitScopedClient
+        from ..core.clinic import resolve
+
+        connection = _mail_connection()
+        if not connection:
+            return {"sent": False, "reason":
+                    "No mail connection is configured, so nothing was sent. The letter "
+                    "is still here and nothing has reached the patient."}
+        try:
+            client = ScalekitScopedClient(
+                ScalekitActions.from_env(connection=connection), session.identifier)
+            client.call(resolve(client, "send_message"),
+                        to=recipient,
+                        subject=(draft.get("letter") or {}).get("subject", "Your appointment"),
+                        body=text)
+        except Exception as e:  # noqa: BLE001
+            return {"sent": False, "reason":
+                    f"The mail connection refused it: {type(e).__name__}. Nothing has "
+                    f"reached the patient; the letter is still here."}
+        return {"sent": True, "at": _now()}
+
+    def update_patient(self, patient_id: str):
+        """Edit a patient's details — including the address their letter goes to.
+
+        Unreachable until now: `PatientStore.update` existed with no route, so a typo in
+        a patient's email was permanent, on the field that decides where a medical
+        summary is delivered.
+        """
+        session = self.store.get(self._sid())
+        if session is None:
+            return self._json({"error": "Sign in first."}, 401)
+
+        length = min(int(self.headers.get("Content-Length") or 0), MAX_HOOK_BYTES)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._json({"error": "Bad request."}, 400)
+
+        email = str(body.get("email") or "").strip()
+        if email and "@" not in email:
+            return self._json({"error": "That does not look like an email address."}, 400)
+
+        patient = self.patients.update(session.identifier, patient_id, body)
+        if patient is None:
+            return self._json({"error": "No such patient on your list."}, 404)
+        return self._json({"ok": True, "patient": patient})
+
     def add_patient(self):
         """Add a patient to the signed-in doctor's list.
 
@@ -653,7 +840,11 @@ class Handler(BaseHTTPRequestHandler):
                 "transcript back. Start a tunnel and restart with --public."}, 503)
 
         binding = Binding(
-            consultation_id=f"con-{patient['id'].lower()}",
+            # The clinician is folded in because patient ids restart at PT-10001 per
+            # doctor. Without it, two doctors' first patients share a consultation id —
+            # and one doctor's transcript lands in the other's record. Observed with two
+            # real accounts, both holding a PT-10001.
+            consultation_id=consultation_id(session.identifier, patient["id"]),
             patient_id=patient["id"], patient_name=patient["name"],
             clinician=session.identifier,          # from the session, never the request
             clinician_name=session.name,

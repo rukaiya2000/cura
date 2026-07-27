@@ -920,3 +920,25 @@ def test_it_stays_silent_through_the_consultation(hooks, monkeypatch):
 
     assert said == [], f"the bot spoke during the consultation: {said}"
     assert len(hooks["live"].get("con-0912")["said"]) == 4, "but every line was recorded"
+
+
+def test_two_clinicians_first_patients_do_not_share_a_consultation():
+    """Patient ids restart at PT-10001 per doctor, so a consultation id derived from the
+    patient alone collides — and one doctor's transcript lands in another's record.
+    Observed with two real accounts, both holding a PT-10001."""
+    from skillforge.ui.serve import consultation_id
+
+    mine = consultation_id("priya.rao@clinic.test", "PT-10001")
+    theirs = consultation_id("james@clinic.test", "PT-10001")
+
+    assert mine != theirs
+    assert consultation_id("priya.rao@clinic.test", "PT-10001") == mine, "not stable"
+
+
+def test_a_consultation_id_carries_no_email():
+    """It travels to MeetStream in custom_attributes and comes back on every webhook. A
+    third party does not need the doctor's address to route a transcript."""
+    from skillforge.ui.serve import consultation_id
+
+    made = consultation_id("priya.rao@clinic.test", "PT-10001")
+    assert "priya" not in made and "@" not in made and "clinic" not in made

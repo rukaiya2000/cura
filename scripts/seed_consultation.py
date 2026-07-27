@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 from skillforge.adapters.meetstream import Binding
 from skillforge.config import get, load_env
+from skillforge.ui.serve import consultation_id
 
 DIM, B, GREEN, BLUE, AMBER, RED, OFF = (
     "\033[2m", "\033[1m", "\033[32m", "\033[38;5;68m", "\033[38;5;179m",
@@ -93,7 +94,7 @@ def main() -> int:
 
     clinician_name = get("SKILLFORGE_CLINICIAN_NAME") or "Dr Rao"
     binding = Binding(
-        consultation_id=f"con-{patient['id'].lower()}",
+        consultation_id=consultation_id(clinician, patient["id"]),
         patient_id=patient["id"], patient_name=patient["name"],
         clinician=clinician, clinician_name=clinician_name,
         crm_id=patient.get("crm_id"),

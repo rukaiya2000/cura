@@ -48,7 +48,8 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 // --- a page instance -------------------------------------------------------
 
-function render({ me, rooms = [], onFetch = () => {}, sendFails = "" }) {
+function render({ me, rooms = [], patients = [], onFetch = () => {},
+                 sendFails = "" }) {
   const errors = [];
   // The build now emits a real document (doctype, <html lang>, <head>). Wrapping it in
   // another one nests a document inside a body, which the parser unpicks by discarding
@@ -62,15 +63,20 @@ function render({ me, rooms = [], onFetch = () => {}, sendFails = "" }) {
       beforeParse(win) {
         // The only stub. matchMedia is deliberately left absent — the page must survive
         // without it, which is what its guard is for.
-        win.fetch = (url) => {
+        // `(url, init)` explicitly: an arrow function has no `arguments` of its own, so
+        // reading `arguments[1]` here silently returned the enclosing scope's and every
+        // recorded request body was `{}`.
+        win.fetch = (url, init = {}) => {
           const path = String(url);
           const answer = (body) => Promise.resolve({
             ok: true, status: 200, json: () => Promise.resolve(body) });
           // Signed out, every endpoint is unreachable — that is what a static build is.
           if (!me) return Promise.reject(new TypeError("Failed to fetch"));
-          onFetch(path, arguments[1] || {});
+          onFetch(path, init);
           if (path.endsWith("/me")) return answer(me);
-          if (path.endsWith("/patients")) return answer({ patients: [] });
+          if (path.endsWith("/patients")) return answer({ patients });
+          if (path.startsWith("/patients/")) return answer(
+            { ok: true, patient: patients[0] });
           if (path.endsWith("/live")) return answer({ consultations: rooms });
           if (path.endsWith("/send")) {
             // A refusal is an HTTP response, not a thrown exception — throwing from the
@@ -660,6 +666,65 @@ async function main() {
 
   live.dom.window.close();
 
+  // --- the patient's record can be read and written -------------------------
+  //
+  // It could be neither: `recordCard` rendered the demo fixture and only for patients
+  // with a `crm_id`, which a real patient never has, and `PatientStore.update` had no
+  // route. A patient's conditions and medications existed in the store and appeared
+  // nowhere, with no way to enter them.
+
+  console.log("\n— the patient record —");
+
+  const withPatient = {
+    id: "PT-10001", name: "Rk test", dob: "1998-02-07", email: "rk@example.test",
+    crm_id: null, conditions: ["Type 2 diabetes"], medications: [], allergies: [],
+    consultations: 0,
+  };
+  const saved = [];
+  const record = render({
+    me: ME, patients: [withPatient],
+    onFetch: (path, init) => {
+      if (path.startsWith("/patients/")) saved.push(JSON.parse(init.body || "{}"));
+    },
+  });
+  await settled();
+  await until(() => record.doc.querySelector(".record-field"), "the record to render");
+
+  t("a real patient's conditions are on screen", () => {
+    const shown = record.doc.getElementById("view-patients").textContent;
+    assert(shown.includes("Type 2 diabetes"), "the condition is not rendered");
+    assert(shown.includes("Medications") && shown.includes("Allergies"),
+           "the record is missing fields");
+  });
+
+  t("an empty field says so rather than rendering nothing", () =>
+    assert(/Nothing recorded/.test(record.doc.getElementById("view-patients").textContent),
+           "an empty field is invisible"));
+
+  await ta("a medication can be added and is saved", async () => {
+    const input = record.doc.getElementById("f-medications");
+    assert(input, "no way to add a medication");
+    input.value = "Ramipril 5 mg OD";
+    input.dispatchEvent(new record.window.Event("input"));
+    input.form.dispatchEvent(
+      new record.window.Event("submit", { cancelable: true, bubbles: true }));
+
+    await until(() => saved.some((b) => b.medications), "the save request");
+    assert(saved.at(-1).medications.includes("Ramipril 5 mg OD"),
+           `sent ${JSON.stringify(saved.at(-1))}`);
+    assert(/Ramipril 5 mg OD/.test(
+      record.doc.getElementById("view-patients").textContent), "not shown after adding");
+  });
+
+  t("no demo record leaks into a real patient", () => {
+    const shown = record.doc.getElementById("view-patients").textContent;
+    assert(!shown.includes("Metformin"), "the fixture's medications are on screen");
+    assert(!/last seen 6 weeks ago/.test(shown), "the fixture's history is on screen");
+  });
+
+  record.window.dispatchEvent(new record.window.Event("pagehide"));
+  record.dom.window.close();
+
   // --- typing survives the poll --------------------------------------------
   //
   // The 3s poll repaints every view by wiping its root. Half-typed patient details, a
@@ -698,6 +763,7 @@ async function main() {
            `focus went to ${typing.doc.activeElement && typing.doc.activeElement.id}`);
   });
 
+  typing.window.dispatchEvent(new typing.window.Event("pagehide"));
   typing.dom.window.close();
 
   // --- the send actually sends ---------------------------------------------
@@ -752,6 +818,7 @@ async function main() {
            "it does not name where it went");
   });
 
+  sending.window.dispatchEvent(new sending.window.Event("pagehide"));
   sending.dom.window.close();
 
   // --- and it does not claim success when the send fails --------------------
@@ -779,6 +846,7 @@ async function main() {
            "the letter cannot be retried");
   });
 
+  failed.window.dispatchEvent(new failed.window.Event("pagehide"));
   failed.dom.window.close();
 
   console.log(failures ? `\n${failures} failed\n` : "\nall checks passed\n");

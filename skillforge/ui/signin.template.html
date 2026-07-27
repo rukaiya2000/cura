@@ -146,6 +146,18 @@
   }
   .sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
 
+  /* `.next` was written and never defined, so the quietest line in the card rendered at
+     full body size and weight — visually the loudest thing on it. */
+  .next {
+    margin-top: 0.75rem; text-align: center;
+    color: var(--ink-3); font-size: var(--step--1); line-height: 1.5;
+  }
+  .switch {
+    display: block; text-align: center; margin: -0.1rem 0 0;
+    color: var(--accent); font-size: var(--step--1); text-decoration: none;
+  }
+  .switch:hover { text-decoration: underline; }
+
   .why {
     margin-top: 1.1rem; padding-top: 0.9rem; border-top: 1px solid var(--rule);
     color: var(--ink-3); font-size: var(--step--1); line-height: 1.55;
@@ -228,6 +240,13 @@
           approval.</p>
 
         <a class="btn" id="signin" href="/auth/login">Sign in</a>
+
+        <!-- Sign-in is silent when the provider already holds a session — correct SSO
+             behaviour, and disconcerting if you meant to use a different account and were
+             never asked. `prompt=login` makes it ask. -->
+        <a class="switch" id="switch" href="/auth/login?prompt=login">Use a different
+          account</a>
+
         <div class="sep">new here</div>
         <a class="btn ghost" id="signup" href="/auth/signup">Create an account</a>
 
@@ -274,11 +293,15 @@
     show("setup", "Sign-in is not configured yet",
          "This deployment has no Scalekit credentials. Set SCALEKIT_ENVIRONMENT_URL, " +
          "SCALEKIT_CLIENT_ID and SCALEKIT_CLIENT_SECRET in .env, then restart the server.");
-    for (const id of ["signin", "signup"]) {
+    for (const id of ["signin", "signup", "switch"]) {
       const el = document.getElementById(id);
+      if (!el) continue;
       el.setAttribute("aria-disabled", "true");
-      el.style.opacity = "0.45";
+      el.style.opacity = "0.5";
       el.style.pointerEvents = "none";
+      // `pointer-events` does nothing to the keyboard. Removing href takes it out of the
+      // tab order too, so Enter cannot reach a login that is known to be unconfigured.
+      el.removeAttribute("href");
     }
   } else if (params.get("error")) {
     // The provider's own words. A generic "something went wrong" is the difference

@@ -27,6 +27,7 @@ import json
 import mimetypes
 import os
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
@@ -60,6 +61,98 @@ DRAFT_PREFIX = "/consultation/"
 #: reading an unbounded Content-Length from an unauthenticated caller is how a public
 #: endpoint becomes a memory exhaustion bug.
 MAX_HOOK_BYTES = 256 * 1024
+
+
+class Rows:
+    """A `key -> JSON` table in SQLite, standing in for a rewritten JSON file.
+
+    The stores here hold one dict and used to rewrite the whole thing on every change.
+    That is fine until it isn't, in three ways worth naming:
+
+    * **A crash mid-write truncates the file.** There was a guard for that — a corrupt
+      file starts empty rather than refusing to boot — but "starts empty" means a
+      clinician's patients are gone. SQLite writes in a transaction, so a write either
+      landed or did not.
+    * **Two writes at once could interleave** and lose one. Single-user demo, so it never
+      bit; it would have.
+    * **Whole-file rewrites** are O(everything) per keystroke-sized change.
+
+    Deliberately not an ORM and deliberately still JSON per row: the shape of a patient is
+    the product's business and changes often, and a schema migration for every new field
+    would buy nothing here. What is bought is atomicity.
+    """
+
+    def __init__(self, path: Path | None, table: str) -> None:
+        self.path = Path(path) if path else None
+        self.table = table
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with self._db() as db:
+                    db.execute(f"CREATE TABLE IF NOT EXISTS {self.table} "
+                               "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            except sqlite3.Error:
+                # A file that is not a database gets the same treatment as a corrupt
+                # one: start empty rather than refuse to boot. The guard existed on
+                # `load` and not here, so opening the app against a damaged store threw
+                # before it ever got as far as reading.
+                self.path = None
+
+    def _db(self):
+        db = sqlite3.connect(self.path, timeout=5.0)
+        # Readers do not block the writer, which is what makes a poll every three
+        # seconds harmless while a doctor is typing.
+        db.execute("PRAGMA journal_mode=WAL")
+        return db
+
+    def load(self) -> dict:
+        if not self.path or not self.path.exists():
+            return {}
+        try:
+            with self._db() as db:
+                rows = db.execute(f"SELECT key, value FROM {self.table}").fetchall()
+            return {k: json.loads(v) for k, v in rows}
+        except (sqlite3.Error, json.JSONDecodeError, OSError):
+            # A corrupt store must not stop the app booting. Starting empty is
+            # recoverable; refusing to start is not.
+            return {}
+
+    def put(self, key: str, value) -> None:
+        if not self.path:
+            return
+        try:
+            with self._db() as db:
+                db.execute(
+                    f"INSERT INTO {self.table} (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps(value)))
+        except sqlite3.Error:
+            pass
+
+    def replace(self, rows: dict) -> None:
+        """Rewrite every row, in one transaction. Used when keys were merged or removed."""
+        if not self.path:
+            return
+        try:
+            with self._db() as db:
+                db.execute(f"DELETE FROM {self.table}")
+                db.executemany(f"INSERT INTO {self.table} (key, value) VALUES (?, ?)",
+                               [(k, json.dumps(v)) for k, v in rows.items()])
+        except sqlite3.Error:
+            pass
+
+    def adopt_json(self, legacy: Path) -> dict:
+        """Import a pre-SQLite JSON file once, so nobody loses what they already had."""
+        if not legacy.is_file():
+            return {}
+        try:
+            rows = json.loads(legacy.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if isinstance(rows, dict) and rows:
+            self.replace(rows)
+            legacy.rename(legacy.with_suffix(".json.imported"))
+        return rows if isinstance(rows, dict) else {}
 
 
 @dataclass
@@ -114,21 +207,23 @@ class PatientStore:
 
     path: Path | None = None
     rows: dict[str, list[dict]] = field(default_factory=dict)
+    _rows: Rows | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if self.path and self.path.is_file():
-            try:
-                self.rows = json.loads(self.path.read_text())
-            except (json.JSONDecodeError, OSError):
-                # A corrupt file must not stop the app booting. Starting empty is
-                # recoverable; refusing to start is not.
-                self.rows = {}
+        # The database path is decided *before* any table is created. Building `Rows` on
+        # the `.json` path first and reassigning afterwards ran CREATE TABLE against the
+        # JSON file and overwrote a clinician's patient list with an empty database.
+        legacy = self.path if self.path and self.path.suffix == ".json" else None
+        db = self.path.with_suffix(".db") if legacy else self.path
+        self._rows = Rows(db, "patients")
+        self.rows = (self._rows.adopt_json(legacy) if legacy else {}) or self._rows.load()
 
-    def _save(self) -> None:
-        if not self.path:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.rows, indent=2))
+    def _save(self, key: str | None = None) -> None:
+        # One row when one clinician's list changed, everything when keys moved.
+        if key is not None and key in self.rows:
+            self._rows.put(key, self.rows[key])
+        else:
+            self._rows.replace(self.rows)
 
     def adopt(self, clinician: str, aliases: list[str]) -> None:
         """Move rows filed under a previous key for this person onto the current one.
@@ -154,7 +249,7 @@ class PatientStore:
                 patient["id"] = f"PT-{10000 + len(unique) + 1}"
                 unique.append(patient)
             self.rows[clinician] = unique
-            self._save()
+            self._save()          # keys moved; rewrite
 
     def list(self, clinician: str, aliases: list[str] | None = None) -> list[dict]:
         if aliases:
@@ -189,7 +284,7 @@ class PatientStore:
                 # Lowercased like `add` does, or the same address is stored two ways and
                 # the two never compare equal.
                 patient[key] = text.lower() if key == "email" else text
-        self._save()
+        self._save(clinician)
         return patient
 
     def observe(self, clinician: str, patient_id: str, entries: list[dict]) -> dict | None:
@@ -216,7 +311,7 @@ class PatientStore:
             if bucket and entry["text"] not in patient.setdefault(bucket, []):
                 patient[bucket].append(entry["text"])
         patient["consultations"] = patient.get("consultations", 0) + 1
-        self._save()
+        self._save(clinician)
         return patient
 
     def add(self, clinician: str, *, name: str, dob: str = "", email: str = "",
@@ -243,7 +338,7 @@ class PatientStore:
             "added_by": clinician,
         }
         mine.append(patient)
-        self._save()
+        self._save(clinician)
         return patient
 
 
@@ -265,19 +360,19 @@ class LiveConsultations:
 
     path: Path | None = None
     rooms: dict[str, dict] = field(default_factory=dict)
+    _rows: Rows | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if self.path and self.path.is_file():
-            try:
-                self.rooms = json.loads(self.path.read_text())
-            except (json.JSONDecodeError, OSError):
-                self.rooms = {}
+        legacy = self.path if self.path and self.path.suffix == ".json" else None
+        db = self.path.with_suffix(".db") if legacy else self.path
+        self._rows = Rows(db, "consultations")
+        self.rooms = (self._rows.adopt_json(legacy) if legacy else {}) or self._rows.load()
 
-    def _save(self) -> None:
-        if not self.path:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.rooms, indent=2))
+    def _save(self, consultation_id: str | None = None) -> None:
+        if consultation_id is not None and consultation_id in self.rooms:
+            self._rows.put(consultation_id, self.rooms[consultation_id])
+        else:
+            self._rows.replace(self.rooms)
 
     def _room(self, binding) -> dict:
         return self.rooms.setdefault(binding.consultation_id, {
@@ -489,7 +584,10 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
 
         if route == "/auth/login":
-            return self.start(signup=False)
+            # `?prompt=login` is how "use a different account" reaches the provider.
+            asked = (query.get("prompt") or [""])[0]
+            return self.start(signup=False,
+                              prompt="login" if asked == "login" else "")
         if route == "/auth/signup":
             return self.start(signup=True)
         if route == "/auth/callback":
@@ -869,11 +967,11 @@ class Handler(BaseHTTPRequestHandler):
                            "consultation_id": binding.consultation_id,
                            "patient_name": patient["name"]})
 
-    def start(self, *, signup: bool):
+    def start(self, *, signup: bool, prompt: str = ""):
         """Hand off to the provider. Sign-in and sign-up differ only in which screen
         Scalekit shows; the callback below cannot tell them apart, and must not need to."""
         try:
-            url, _state = self.auth.login_url(signup=signup)
+            url, _state = self.auth.login_url(signup=signup, prompt=prompt)
         except AuthError:
             # Missing credentials is a deployment problem, not the doctor's. Send them to
             # the sign-in page, which explains it and disables the buttons, rather than a
@@ -899,7 +997,11 @@ class Handler(BaseHTTPRequestHandler):
         target = f"{SIGNIN_ROUTE}?signedout=1"
         if session is not None:
             try:
-                target = self.auth.logout_url(session, redirect_to=self.origin())
+                # Back to the sign-in page *with the signed-out banner*, not to `/`,
+                # which redirects onward and leaves no evidence anything happened.
+                target = self.auth.logout_url(
+                    session, redirect_to=f"{self.origin().rstrip('/')}{SIGNIN_ROUTE}"
+                                         "?signedout=1")
             except Exception:  # noqa: BLE001 — a local logout must still succeed
                 pass
         return self._redirect(target, clear=True)

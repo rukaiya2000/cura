@@ -179,14 +179,15 @@ class Auth:
 
     # --- leaving ------------------------------------------------------------
 
-    def login_url(self, *, signup: bool = False) -> tuple[str, str]:
+    def login_url(self, *, signup: bool = False,
+                  prompt: str = "") -> tuple[str, str]:
         """The URL to send the browser to, and the `state` that must come back.
 
         `state` is generated here and checked on return — without it, anyone can hand the
         callback a code of their choosing and log the victim into an attacker's account.
 
         `signup=True` sets `prompt=create`, which lands on Scalekit's account-creation
-        screen instead of its sign-in screen. It is a *hint about which screen to show*,
+        screen instead of its sign-in screen. `prompt="login"` forces re-authentication. It is a *hint about which screen to show*,
         not a separate flow: the callback, the token exchange and the session that comes
         back are identical either way, so nothing downstream has to know which button was
         pressed. Treating sign-up as its own pipeline is how the two drift apart.
@@ -197,7 +198,13 @@ class Auth:
         options = AuthorizationUrlOptions()
         options.scopes = self.scopes
         options.state = state
-        if signup:
+        # `create` lands on the account-creation screen. `login` forces the provider to
+        # ask again even when it already has a session — without it a sign-in is silent,
+        # which is correct SSO behaviour and deeply surprising when you wanted to use a
+        # different account and were never given the chance to say so.
+        if prompt:
+            options.prompt = prompt
+        elif signup:
             options.prompt = "create"
 
         url = self.client.get_authorization_url(self.redirect_uri, options)

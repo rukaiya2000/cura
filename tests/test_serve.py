@@ -31,12 +31,13 @@ class FakeAuth:
         self.states: list[str] = []
         self.seen: dict = {}
 
-    def login_url(self, *, signup=False):
+    def login_url(self, *, signup=False, prompt=""):
         if not self.configured:
             raise AuthError("missing credentials: SCALEKIT_CLIENT_ID")
         state = f"state-{len(self.states)}"
         self.states.append(state)
         self.seen["signup"] = signup
+        self.seen["prompt"] = prompt
         return f"https://auth.example/authorize?state={state}", state
 
     def callback(self, *, code, state):
@@ -942,3 +943,120 @@ def test_a_consultation_id_carries_no_email():
 
     made = consultation_id("priya.rao@clinic.test", "PT-10001")
     assert "priya" not in made and "@" not in made and "clinic" not in made
+
+
+# --- SQLite, and the migration into it ---------------------------------------
+
+
+def test_a_json_store_is_imported_once_and_then_left_alone(tmp_path):
+    """Nobody loses what they already had. The old file is renamed rather than deleted,
+    so a bad import is recoverable."""
+    legacy = tmp_path / "patients.json"
+    legacy.write_text(json.dumps({"dr@clinic.test": [
+        {"id": "PT-10001", "name": "Rk test", "conditions": ["Asthma"]}]}))
+
+    store = PatientStore(path=legacy)
+    assert [p["name"] for p in store.list("dr@clinic.test")] == ["Rk test"]
+    assert (tmp_path / "patients.db").exists(), "no database was created"
+    assert not legacy.exists(), "the old file was left where it would be re-imported"
+    assert (tmp_path / "patients.json.imported").exists(), "the old file was destroyed"
+
+    # Reopening reads the database, not the file.
+    assert PatientStore(path=legacy).list("dr@clinic.test")[0]["conditions"] == ["Asthma"]
+
+
+def test_creating_a_store_never_writes_over_the_json_it_is_importing(tmp_path):
+    """Regression, and a destructive one: the database was opened *at* the `.json` path
+    before the `.db` path was chosen, so CREATE TABLE overwrote a clinician's patient
+    list with an empty database."""
+    legacy = tmp_path / "patients.json"
+    original = json.dumps({"dr@clinic.test": [{"id": "PT-10001", "name": "Rk test"}]})
+    legacy.write_text(original)
+
+    PatientStore(path=legacy)
+
+    kept = tmp_path / "patients.json.imported"
+    assert kept.read_text() == original, "the JSON was mangled during import"
+
+
+def test_a_write_is_atomic_rather_than_a_whole_file_rewrite(tmp_path):
+    """The point of the change. A crash mid-rewrite used to truncate the file, and the
+    guard for that — start empty — means a clinician's patients are gone."""
+    store = PatientStore(path=tmp_path / "cura.db")
+    store.add("dr@clinic.test", name="One")
+    store.add("dr@clinic.test", name="Two")
+
+    reopened = PatientStore(path=tmp_path / "cura.db")
+    assert [p["name"] for p in reopened.list("dr@clinic.test")] == ["One", "Two"]
+
+
+def test_a_corrupt_database_does_not_stop_the_app(tmp_path):
+    path = tmp_path / "cura.db"
+    path.write_bytes(b"\x00\x01 this is not a database \xff")
+    assert PatientStore(path=path).list("anyone") == []
+
+
+def test_two_stores_on_one_database_see_each_other(tmp_path):
+    """Concurrent writers were the other reason to move off a rewritten file: two saves
+    at once could interleave and lose one."""
+    path = tmp_path / "cura.db"
+    a = PatientStore(path=path)
+    a.add("dr@clinic.test", name="From A")
+
+    b = PatientStore(path=path)
+    b.add("dr@clinic.test", name="From B")
+
+    assert [p["name"] for p in PatientStore(path=path).list("dr@clinic.test")] \
+        == ["From A", "From B"]
+
+
+def test_consultations_migrate_too(tmp_path):
+    from skillforge.adapters.meetstream import Utterance
+    from skillforge.ui.serve import LiveConsultations
+
+    legacy = tmp_path / "consultations.json"
+    store = LiveConsultations(path=legacy)
+    store.said(Utterance(text="Anything.", speaker="Amara Okafor", role="patient",
+                         at="2026-07-27T09:20", binding=HOOK_BINDING))
+
+    assert (tmp_path / "consultations.db").exists()
+    assert LiveConsultations(path=legacy).get("con-0912")["said"][0]["text"] == "Anything."
+
+
+# --- choosing which account to sign in as ------------------------------------
+
+
+def test_a_plain_sign_in_asks_the_provider_for_nothing_special(site):
+    """The default is right: if the provider already knows you, going straight in is what
+    single sign-on is for."""
+    made = site()
+    fetch(made, "/auth/login")
+    assert made["auth"].seen["prompt"] == ""
+
+
+def test_use_a_different_account_forces_the_provider_to_ask(site):
+    """Without this a sign-in is silent whenever the provider holds a session, so there
+    is no way to say "not that account" — you are simply signed in as whoever you were."""
+    made = site()
+    r = fetch(made, "/auth/login?prompt=login")
+
+    assert r.status == 302
+    assert made["auth"].seen["prompt"] == "login"
+
+
+def test_an_arbitrary_prompt_is_not_passed_through(site):
+    """The value reaches an identity provider; it is chosen here, not by the query string."""
+    made = site()
+    fetch(made, "/auth/login?prompt=none")
+    assert made["auth"].seen["prompt"] == ""
+
+
+def test_logout_returns_to_a_page_that_says_you_are_signed_out(site):
+    """It used to send the provider back to `/`, which redirects onward to the sign-in
+    page — so the banner never showed and a logout left no evidence it had happened."""
+    made = site()
+    sign_in(made)
+    fetch(made, "/auth/logout")
+
+    assert "signedout=1" in made["auth"].seen["logout_redirect"]
+    assert "/signin" in made["auth"].seen["logout_redirect"]

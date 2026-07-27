@@ -444,6 +444,52 @@
     font-weight: 600;
   }
 
+  /* --- the patient's record ------------------------------------------ */
+
+  /* `.label` was doing five jobs — card title, metadata value, form label, whole
+     sentences, and a patient's name in 0.78rem caps. Split so each reads as what it is. */
+  .card-title {
+    font: 600 var(--step-0)/1.3 var(--sans); color: var(--ink);
+  }
+  .meta { color: var(--ink-3); font-size: var(--step--1); }
+  .field-label {
+    font: 600 var(--step--1)/1.3 var(--sans);
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3);
+    margin: 0 0 0.4rem;
+  }
+  .req { font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+  .record-field + .record-field {
+    margin-top: 1.1rem; padding-top: 1.1rem; border-top: 1px solid var(--rule);
+  }
+  .chips {
+    list-style: none; margin: 0 0 0.55rem; padding: 0;
+    display: flex; flex-wrap: wrap; gap: 0.35rem;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    padding: 0.2rem 0.3rem 0.2rem 0.6rem; border-radius: 999px;
+    border: 1px solid var(--rule-strong); background: var(--panel-2);
+    font-size: var(--step--1);
+  }
+  .chip-x {
+    display: grid; place-items: center; width: 1.15rem; height: 1.15rem;
+    border: 0; border-radius: 50%; background: transparent; color: var(--ink-3);
+    font: 400 0.9rem/1 var(--sans); cursor: pointer;
+  }
+  .chip-x:hover { background: var(--refused-soft); color: var(--refused); }
+  .chip-empty { color: var(--ink-3); font-size: var(--step--1); font-style: italic; }
+
+  .chip-add { display: flex; gap: 0.4rem; }
+  .chip-add input {
+    flex: 1; min-width: 0;
+    font: var(--step-0) var(--sans); color: var(--ink);
+    padding: 0.35rem 0.55rem; border: 1px solid var(--rule-strong);
+    border-radius: var(--radius); background: var(--panel);
+  }
+  .chip-add input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn.small { width: auto; padding: 0.35rem 0.8rem; font-size: var(--step--1); }
+
   /* --- schedule / patient rows -------------------------------------- */
 
   .rows { display: flex; flex-direction: column; }
@@ -721,6 +767,7 @@
   };
   const statusText = (s) => STATUS_TEXT[s] || "Unknown";
 
+  let alive = true;            // false once the page is unloading
   let view = "today";
   let adding = false;                 // the + form is open
   let busy = null;                    // an in-flight request, so buttons can disable
@@ -837,6 +884,16 @@
     if (livePoll) return;
     livePoll = setInterval(refreshLive, 3000);
   }
+
+  // An interval that outlives its page is a leak, and it fires against a torn-down
+  // document — which is exactly how it showed up: a callback reaching for
+  // `document.activeElement` after the window had gone.
+  addEventListener("pagehide", () => {
+    alive = false;
+    if (livePoll) clearInterval(livePoll);
+    if (send.timer) clearInterval(send.timer);
+    livePoll = null;
+  });
   let LIVE = [];
   let liveNote = [];
 
@@ -929,6 +986,9 @@
   //: at each call site — `show` used to bypass the bracket and lose the caret on a tab
   //: click even though the value survived.
   function repaint(fn) {
+    // Nothing paints after the page is gone. Clearing the poll is not enough — a fetch
+    // already in flight resolves afterwards and renders into a torn-down document.
+    if (!alive) return;
     rememberFocus();
     fn();
     restoreFocus();
@@ -1036,18 +1096,126 @@
     const left = el("div", "col");
     const right = el("div", "col");
 
-    if (patient) left.append(meetingCard(patient));
-    if (patient && patient.crm_id) {
-      left.append(recordCard(DATA.context));
-      left.append(historyCard(DATA.history));
-    } else if (patient) {
-      left.append(newPatientCard(patient));
+    if (patient) {
+      if (recordError) {
+        const warn = el("p", "form-error", recordError);
+        warn.setAttribute("role", "alert");
+        left.append(warn);
+      }
+      left.append(recordEditor(patient));
+      // A patient with no CRM record is the *new patient* case, and it says the thing
+      // worth saying: a record is a write, so nothing creates one from an appointment.
+      if (!patient.crm_id) left.append(newPatientCard(patient));
+      left.append(meetingCard(patient));
+      left.append(consultationsCard(patient));
+      // The fixture record and history are the preview's, and only the preview's.
+      if (!live) {
+        if (patient.crm_id) left.append(recordCard(DATA.context), historyCard(DATA.history));
+      }
     }
 
     right.append(rosterCard());
     cols.append(left, right);
     root.append(cols);
   }
+
+  //: The patient's own clinical record — the thing this app is about, and the thing it
+  //: previously never rendered. `recordCard` read `DATA.context`, the demo fixture, and
+  //: only for patients with a `crm_id`, which a real patient never has. So a real
+  //: patient's conditions, medications and allergies existed in the store and appeared
+  //: nowhere on screen, and there was no route to enter them either.
+  const RECORD_FIELDS = [
+    ["conditions", "Conditions", "e.g. Type 2 diabetes"],
+    ["medications", "Medications", "e.g. Metformin 1000 mg BD"],
+    ["allergies", "Allergies", "e.g. Penicillin"],
+  ];
+
+  function recordEditor(patient) {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "card-title", "Record"));
+    if (patient.crm_id) header.append(el("span", "meta", patient.crm_id));
+    card.append(header);
+
+    const body = el("div", "body");
+    for (const [key, label, hint] of RECORD_FIELDS) {
+      body.append(recordField(patient, key, label, hint));
+    }
+    card.append(body);
+    return card;
+  }
+
+  function recordField(patient, key, label, hint) {
+    const wrap = el("div", "record-field");
+    wrap.append(el("h4", "field-label", label));
+
+    const items = patient[key] || [];
+    const list = el("ul", "chips");
+    if (!items.length) {
+      list.append(el("li", "chip-empty", `Nothing recorded`));
+    }
+    for (const value of items) {
+      const chip = el("li", "chip");
+      chip.append(el("span", null, value));
+      const drop = el("button", "chip-x", "×");
+      drop.type = "button";
+      // Named, because "×" alone announces as "times" and a screen reader user has no
+      // way to tell which of six identical buttons they are on.
+      drop.setAttribute("aria-label", `Remove ${value} from ${label.toLowerCase()}`);
+      drop.onclick = () => saveRecord(patient, key, items.filter((v) => v !== value));
+      chip.append(drop);
+      list.append(chip);
+    }
+    wrap.append(list);
+
+    const form = el("form", "chip-add");
+    const input = el("input");
+    input.type = "text";
+    input.id = `f-${key}`;
+    input.placeholder = hint;
+    input.value = forms[key] || "";
+    input.setAttribute("aria-label", `Add to ${label.toLowerCase()}`);
+    input.oninput = () => { forms[key] = input.value; };
+    const add = el("button", "btn ghost small", "Add");
+    add.type = "submit";
+    form.append(input, add);
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const value = (forms[key] || "").trim();
+      if (!value) return;
+      forms[key] = "";
+      saveRecord(patient, key, [...items, value]);
+    };
+    wrap.append(form);
+    return wrap;
+  }
+
+  function saveRecord(patient, key, values) {
+    // Optimistic, then reconciled with what the server actually stored — a doctor typing
+    // a medication should not wait on a round trip to see it, but what ends up on screen
+    // must be what was saved.
+    patient[key] = values;
+    renderAll();
+    fetch(`/patients/${patient.id}`, {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [key]: values }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) throw new Error(d.error || "Could not save that.");
+        Object.assign(patient, d.patient);
+        renderAll();
+      })
+      .catch(() => {
+        recordError = live
+          ? "That change was not saved — the server refused it."
+          : "No server behind this page, so nothing was saved.";
+        renderAll();
+      });
+  }
+
+  let recordError = "";
 
   function newPatientCard(patient) {
     const card = el("section", "card");
@@ -1066,6 +1234,55 @@
     card.append(body);
     return card;
   }
+
+  //: Every consultation for this patient, not just the live one. Previously a finished
+  //: consultation was unreachable the moment it dropped off `/live`, so the transcript,
+  //: the note and the letter that was sent all became unreadable.
+  function consultationsCard(patient) {
+    const card = el("section", "card");
+    const header = el("header");
+    header.append(el("h3", "card-title", "Consultations"));
+    const mine = LIVE.filter((r) => r.patient_id === patient.id);
+    header.append(el("span", "meta", `${mine.length}`));
+    card.append(header);
+
+    if (!mine.length) {
+      const body = el("div", "empty");
+      body.append(el("p", "prose",
+        `No consultations yet for ${patient.name}. Paste a meeting link above and Cura ` +
+        `joins, already knowing who it is for.`));
+      card.append(body);
+      return card;
+    }
+
+    const rows = el("div", "rows");
+    for (const room of mine) {
+      const row = el("button", "row-item");
+      row.append(el("span", "when", statusText(room.status)));
+      const who = el("div", "who");
+      who.append(el("b", null, `${room.said.length} line${room.said.length === 1 ? "" : "s"}`));
+      const meta = el("div", "meta");
+      meta.append(document.createTextNode(
+        room.sent_at ? `letter sent ${room.sent_at.slice(0, 10)}`
+          : room.draft ? "drafted, waiting for you"
+          : room.said.length ? "not drafted yet" : "nothing captured"));
+      who.append(meta);
+      row.append(who);
+      if (room.draft && !room.sent_at) {
+        const pill = el("span", "pill", "Needs approval");
+        pill.dataset.kind = "attention";
+        row.append(pill);
+      } else {
+        row.append(el("span"));
+      }
+      row.onclick = () => { openRoom = room.consultation_id; show("consult"); };
+      rows.append(row);
+    }
+    card.append(rows);
+    return card;
+  }
+
+  let openRoom = null;
 
   function rosterCard() {
     const card = el("section", "card");
@@ -1157,7 +1374,7 @@
   let caret = 0;
 
   function rememberFocus() {
-    const active = document.activeElement;
+    const active = typeof document !== "undefined" && document.activeElement;
     if (active && active.id && active.id.startsWith("f-")) {
       focusKey = active.id;
       caret = active.selectionStart ?? active.value.length;
